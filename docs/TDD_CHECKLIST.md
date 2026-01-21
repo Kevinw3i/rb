@@ -6,7 +6,21 @@
 - [ ] Cancel reduce-only orders when trigger condition is inactive.
 - [ ] Tick output format uses UTC+8 time.
 - [ ] Event logs are printed for connect/reconnect, order placement, and cancellation.
-- [ ] Log file appends EVENT/ERROR/TICK lines at `RB_LOG_PATH` (default `rb.log`) unless `--no-log` is set.
+- [ ] Log file appends EVENT lines at `RB_LOG_PATH` (default `rb.log`) unless `--no-log` is set.
 - [ ] Order/position EVENT logs include `current_price=<last_price>` when available.
 - [ ] Warn on startup when trigger/order gap is >= 10%.
 - [ ] REST requests use Unified account PAPI UM endpoints by default.
+- [ ] Open orders are cached briefly to avoid duplicate REST calls within a manage cycle.
+- [ ] Open order cache is cleared after order placement/cancellation to prevent stale decisions.
+- [ ] Rate-limit headers are logged periodically when available.
+- [ ] 429/418 responses trigger backoff before retry.
+- [ ] TP/stop fills cancel remaining managed orders and exit.
+- [ ] User data stream listenKey is created/kept alive and triggers exit on TP/stop fills.
+- [ ] `--entry/--stop/--side` are optional but must be provided together.
+- [ ] Entry order uses maker-only LIMIT at `--entry` (GTX) with `entry_usdc * leverage / entry_price`.
+- [ ] Entry order quantity is floored to the LOT_SIZE step from exchange info (log raw vs rounded).
+- [ ] Entry order placement requires entry USDC amount; leverage defaults to 100.
+- [ ] Stop-loss uses reduce-only STOP_MARKET at `--stop` with latest price trigger (CONTRACT_PRICE) via conditional order endpoint and open-conditional tracking.
+- [ ] Stop-loss quantity uses current position size or entry order quantity when flat.
+- [ ] Entry/stop management does not interfere with trigger/order reduce-only logic.
+- [ ] Entry detection supports `prefix` (bot orders only) or `any` (matching web LIMIT orders).

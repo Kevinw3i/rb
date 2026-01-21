@@ -2,8 +2,18 @@
 
 - WebSocket reconnects after a disconnect.
 - Tick output format is unchanged.
-- Event logs print executed actions and are appended to the log file unless `--no-log` is set.
+- Event logs print executed actions and are appended to the log file unless `--no-log` is set (EVENT only).
 - Order/position EVENT logs include `current_price=<last_price>` when available.
 - Startup warns on trigger/order gap >= 10% and continues.
-- Reduce-only orders are placed with `GTX` and canceled on trigger exit.
+- Reduce-only orders are placed with `GTX` and canceled on trigger exit (bot-managed clientOrderId only).
+- Entry maker-only orders and stop-loss orders operate independently of trigger/order.
+- Stop-loss uses UM conditional orders and stays in sync with open conditional orders.
+- Entry order sizing uses entry USDC amount and leverage (default 100) and is floored to the LOT_SIZE step; missing amount skips entry placement if no entry order exists.
+- Stop-loss quantity prefers the updated computed entry size when entry orders are replaced.
+- Entry detection defaults to prefix and supports `any` for matching web LIMIT orders.
+- Open orders are cached briefly to reduce duplicate REST calls.
+- Open order cache is cleared after order mutations to avoid stale cancellations/placements.
+- Rate-limit status/backoff events appear when applicable.
+- TP/stop fills cancel remaining managed orders and exit.
+- User data stream connects to receive order updates.
 - REST calls default to Unified account PAPI UM endpoints.
