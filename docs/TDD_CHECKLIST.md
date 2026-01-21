@@ -20,6 +20,7 @@
 - [ ] Entry order uses maker-only LIMIT at `--entry` (GTX) with `entry_usdc * leverage / entry_price`.
 - [ ] Entry order quantity is floored to the LOT_SIZE step from exchange info (log raw vs rounded).
 - [ ] Entry order placement requires entry USDC amount; leverage defaults to 100.
+- [ ] Once a position is opened, no new entry orders are placed.
 - [ ] Stop-loss uses reduce-only STOP_MARKET at `--stop` with latest price trigger (CONTRACT_PRICE) via conditional order endpoint and open-conditional tracking.
 - [ ] Stop-loss quantity uses current position size or entry order quantity when flat.
 - [ ] Entry/stop management does not interfere with trigger/order reduce-only logic.

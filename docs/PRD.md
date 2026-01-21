@@ -29,6 +29,7 @@
 - Optional entry/stop flow (independent of trigger/order):
   - Place a maker-only LIMIT entry order at `--entry` using `entry_usdc * leverage / entry_price`.
   - Entry quantity is floored to the symbol LOT_SIZE step from exchange info; raw vs rounded qty is logged, and placement is skipped if the rounded qty is zero.
+  - Entry is single-use: once a position is opened, no new entry orders are placed.
   - When the entry order is open or a position exists, ensure a reduce-only STOP_MARKET stop-loss at `--stop`.
   - Stop-loss uses UM conditional orders and is tracked via open conditional orders (strategyId/newClientStrategyId).
   - Stop-loss trigger uses the latest price (CONTRACT_PRICE), reduce-only = true, maker-only = false.

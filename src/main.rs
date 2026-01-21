@@ -392,6 +392,7 @@ struct OrderManager {
     exit_requested: bool,
     exit_reason: Option<String>,
     position_was_open: bool,
+    entry_completed: bool,
     symbol_filters: Option<SymbolFilters>,
     last_filters_attempt_at: Option<Instant>,
     entry_round_logged: bool,
@@ -550,6 +551,7 @@ impl OrderManager {
             exit_requested: false,
             exit_reason: None,
             position_was_open: false,
+            entry_completed: false,
             symbol_filters: None,
             last_filters_attempt_at: None,
             entry_round_logged: false,
@@ -995,6 +997,10 @@ impl OrderManager {
         let position_qty_str = abs_str(&position.amt_str);
         let position_qty = position_qty_str.parse::<f64>().unwrap_or(0.0);
         let has_position = position.amt.abs() > f64::EPSILON;
+        if has_position && !self.entry_completed {
+            self.entry_completed = true;
+            self.event_with_price(&format!("event=entry_completed symbol={symbol}"));
+        }
         let mut entry_qty = entry.entry_qty();
         let mut entry_qty_reason: Option<&str> = None;
         if entry_qty.is_none() {
@@ -1042,7 +1048,9 @@ impl OrderManager {
             self.entry_missing_logged = false;
         }
 
-        if let Some((entry_qty, entry_qty_str)) = entry_qty.clone() {
+        if self.entry_completed {
+            // Entry already filled once; do not place new entry orders.
+        } else if let Some((entry_qty, entry_qty_str)) = entry_qty.clone() {
             let mut has_expected = false;
 
             for order in &entry_orders {

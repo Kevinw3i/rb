@@ -69,3 +69,6 @@
 22. Entry replacement stop quantity
    - Create an existing entry order with a mismatched quantity, then run with a new `entry_usdc` that forces replacement.
    - Expect the stop-loss quantity to match the new rounded entry quantity, not the canceled order qty.
+23. Entry single-use
+   - Let the entry order fill once and the position open.
+   - Expect no new entry orders to be placed while the bot continues running.

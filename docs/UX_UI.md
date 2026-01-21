@@ -8,6 +8,7 @@
 ## Entry Options
 - Optional entry/stop inputs: `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>]`.
 - Entry order size is derived from USDC amount and leverage (default 100), then floored to the LOT_SIZE step from exchange info.
+- Entry is single-use: once a position is opened, no new entry orders are placed.
 - Entry detection default is `prefix`; use `any` to detect web-placed LIMIT orders matching entry price/side.
 - Stop-loss orders are tracked as UM conditional orders (strategyId/newClientStrategyId).
 
