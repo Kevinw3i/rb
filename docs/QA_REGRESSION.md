@@ -9,6 +9,7 @@
 - Entry maker-only orders and stop-loss orders operate independently of trigger/order.
 - Stop-loss uses UM conditional orders and stays in sync with open conditional orders.
 - Entry order sizing uses entry USDC amount and leverage (default 100) and is floored to the LOT_SIZE step; missing amount skips entry placement if no entry order exists.
+- When entry USDC and leverage are provided, startup cancels same-price entry/stop orders once before placing refreshed orders.
 - Entry is single-use: once a position is opened, no new entry orders are placed.
 - Stop-loss quantity prefers the updated computed entry size when entry orders are replaced.
 - Entry detection defaults to prefix and supports `any` for matching web LIMIT orders.

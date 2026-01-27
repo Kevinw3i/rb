@@ -8,6 +8,7 @@
 ## Entry Options
 - Optional entry/stop inputs: `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>]`.
 - Entry order size is derived from USDC amount and leverage (default 100), then floored to the LOT_SIZE step from exchange info.
+- When both entry USDC and leverage are provided, startup cancels same-price entry/stop orders before re-placing them with the computed rounded quantity.
 - Entry is single-use: once a position is opened, no new entry orders are placed.
 - Entry detection default is `prefix`; use `any` to detect web-placed LIMIT orders matching entry price/side.
 - Stop-loss orders are tracked as UM conditional orders (strategyId/newClientStrategyId).
@@ -19,6 +20,7 @@
 - Startup logs a warning event if trigger/order gap is >= 10%.
 - Rate-limit events include `rate_limit_status` and `rate_limit_backoff`.
 - Entry quantity rounding logs `entry_qty_round` (raw vs rounded) or `entry_qty_round_skip` if the rounded qty is zero.
+- Startup entry cleanup logs `entry_startup_cleanup` with counts when same-price orders are canceled.
 - Exit events include `event=exit` and `event=exit_done`.
 - User data stream events include `user_stream_start`, `user_stream_connected`, `user_stream_keepalive`, `user_stream_expired`.
 - REST calls default to Unified account (`https://papi.binance.com`).

@@ -66,9 +66,10 @@
 21. Trigger flip with cached open orders
    - Use a small trigger gap so price oscillates around the threshold within 1 second.
    - Expect reduce-only TP orders to be placed/canceled correctly without stale orders remaining.
-22. Entry replacement stop quantity
-   - Create an existing entry order with a mismatched quantity, then run with a new `entry_usdc` that forces replacement.
-   - Expect the stop-loss quantity to match the new rounded entry quantity, not the canceled order qty.
+22. Startup cleanup with same-price orders
+   - Create existing entry/stop orders at the same entry/stop prices (any quantity).
+   - Run with both `--entry-usdc` and `--leverage` provided.
+   - Expect an `entry_startup_cleanup` EVENT, cancellations of same-price entry/stop orders, and fresh orders sized from the new rounded entry quantity.
 23. Entry single-use
    - Let the entry order fill once and the position open.
    - Expect no new entry orders to be placed while the bot continues running.

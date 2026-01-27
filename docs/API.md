@@ -21,6 +21,7 @@
 - `DELETE /papi/v1/listenKey` (close)
 - clientOrderId prefixes: `rb-tp-` (take-profit), `rb-entry-` (entry), `rb-stop-` (stop-loss, `newClientStrategyId`).
 - Entry order quantity is derived from entry USDC amount and leverage (default 100), then floored to the LOT_SIZE step.
+- When both entry USDC and leverage are provided, the first entry-manage pass cancels same-price entry orders and same-stop stop-loss orders before placing refreshed orders.
 
 ## REST (public)
 - Base: `https://fapi.binance.com` (exchange info for filters).

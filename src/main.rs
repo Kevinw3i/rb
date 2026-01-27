@@ -123,6 +123,8 @@ struct EntryConfig {
     entry_usdc: Option<f64>,
     entry_usdc_str: Option<String>,
     leverage: u32,
+    entry_usdc_provided: bool,
+    leverage_provided: bool,
 }
 
 struct Config {
@@ -396,6 +398,7 @@ struct OrderManager {
     symbol_filters: Option<SymbolFilters>,
     last_filters_attempt_at: Option<Instant>,
     entry_round_logged: bool,
+    entry_startup_cleanup_done: bool,
 }
 
 type SharedManager = Arc<AsyncMutex<OrderManager>>;
@@ -555,6 +558,7 @@ impl OrderManager {
             symbol_filters: None,
             last_filters_attempt_at: None,
             entry_round_logged: false,
+            entry_startup_cleanup_done: false,
         }
     }
 
@@ -970,11 +974,12 @@ impl OrderManager {
             None => return Ok(()),
         };
         let expected_entry_side = entry.side.entry_side();
+        let expected_stop_side = entry.side.stop_side();
 
         self.refresh_position_if_needed(symbol, true).await?;
         let orders = self.client.get_open_orders(symbol).await?;
         let conditional_orders = self.client.get_open_conditional_orders(symbol).await?;
-        let entry_orders: Vec<OpenOrder> = orders
+        let mut entry_orders: Vec<OpenOrder> = orders
             .iter()
             .filter(|o| match entry_detect {
                 EntryDetect::Prefix => o.client_order_id.starts_with(ENTRY_CLIENT_ID_PREFIX),
@@ -982,10 +987,48 @@ impl OrderManager {
             })
             .cloned()
             .collect();
-        let stop_orders: Vec<ConditionalOrder> = conditional_orders
+        let mut stop_orders: Vec<ConditionalOrder> = conditional_orders
             .into_iter()
             .filter(|o| o.client_strategy_id.starts_with(STOP_CLIENT_ID_PREFIX))
             .collect();
+        let should_startup_cleanup = !self.entry_startup_cleanup_done
+            && entry.entry_usdc_provided
+            && entry.leverage_provided;
+        if should_startup_cleanup {
+            let same_price_entry_orders: Vec<OpenOrder> = entry_orders
+                .iter()
+                .filter(|o| is_same_price_entry_order(o, expected_entry_side, entry.entry_price))
+                .cloned()
+                .collect();
+            let same_price_stop_orders: Vec<ConditionalOrder> = stop_orders
+                .iter()
+                .filter(|o| is_same_price_stop_order(o, expected_stop_side, entry.stop_price))
+                .cloned()
+                .collect();
+
+            if !same_price_entry_orders.is_empty() || !same_price_stop_orders.is_empty() {
+                self.event_with_price(&format!(
+                    "event=entry_startup_cleanup symbol={symbol} entry_cancel={} stop_cancel={}",
+                    same_price_entry_orders.len(),
+                    same_price_stop_orders.len()
+                ));
+                if !same_price_entry_orders.is_empty() {
+                    self.cancel_orders(symbol, &same_price_entry_orders).await?;
+                    entry_orders.retain(|o| {
+                        !is_same_price_entry_order(o, expected_entry_side, entry.entry_price)
+                    });
+                }
+                if !same_price_stop_orders.is_empty() {
+                    self.cancel_conditional_orders(symbol, &same_price_stop_orders)
+                        .await?;
+                    stop_orders.retain(|o| {
+                        !is_same_price_stop_order(o, expected_stop_side, entry.stop_price)
+                    });
+                }
+                self.clear_open_orders_cache();
+            }
+            self.entry_startup_cleanup_done = true;
+        }
         self.stop_client_id = stop_orders.first().map(|o| o.client_strategy_id.clone());
 
         let has_entry_orders = !entry_orders.is_empty();
@@ -1961,6 +2004,10 @@ fn is_expected_entry_order(order: &OpenOrder, side: &str, price: f64, qty: f64) 
     approx_eq(order_price, price) && approx_eq(order_qty, qty)
 }
 
+fn is_same_price_entry_order(order: &OpenOrder, side: &str, price: f64) -> bool {
+    is_entry_candidate(order, side, price)
+}
+
 fn is_entry_candidate(order: &OpenOrder, side: &str, price: f64) -> bool {
     if order.side != side {
         return false;
@@ -1976,6 +2023,23 @@ fn is_entry_candidate(order: &OpenOrder, side: &str, price: f64) -> bool {
 
     let order_price = order.price.parse::<f64>().unwrap_or(0.0);
     approx_eq(order_price, price)
+}
+
+fn is_same_price_stop_order(order: &ConditionalOrder, side: &str, stop_price: f64) -> bool {
+    if order.side != side {
+        return false;
+    }
+
+    if order.strategy_type != "STOP_MARKET" {
+        return false;
+    }
+
+    if !order.reduce_only {
+        return false;
+    }
+
+    let order_stop = order.stop_price.parse::<f64>().unwrap_or(0.0);
+    approx_eq(order_stop, stop_price)
 }
 
 fn is_expected_stop_order(order: &ConditionalOrder, side: &str, stop_price: f64, qty: f64) -> bool {
@@ -2245,6 +2309,7 @@ fn parse_args() -> Result<Config, String> {
             let side = parse_entry_side(&side_str).ok_or_else(usage)?;
 
             let entry_usdc_str = entry_usdc.or_else(entry_usdc_from_env);
+            let entry_usdc_provided = entry_usdc_str.is_some();
             let entry_usdc_value = match entry_usdc_str.as_deref() {
                 Some(usdc_str) => {
                     let usdc = usdc_str.parse::<f64>().map_err(|_| usage())?;
@@ -2256,6 +2321,7 @@ fn parse_args() -> Result<Config, String> {
                 None => None,
             };
             let leverage_str = entry_leverage.or_else(entry_leverage_from_env);
+            let leverage_provided = leverage_str.is_some();
             let leverage = match leverage_str.as_deref() {
                 Some(leverage_str) => {
                     let value = leverage_str.parse::<u32>().map_err(|_| usage())?;
@@ -2276,6 +2342,8 @@ fn parse_args() -> Result<Config, String> {
                 entry_usdc: entry_usdc_value,
                 entry_usdc_str,
                 leverage,
+                entry_usdc_provided,
+                leverage_provided,
             })
         }
         _ => {
