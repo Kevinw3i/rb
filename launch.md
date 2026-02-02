@@ -14,6 +14,7 @@ cargo run -- --symbol BTC/USDC --market futures --trigger 95450 --order 93658.7
 - 取消門檻：--entry-abort <price>（需搭配 entry/stop/side）
   - entry 未成交前若價格先觸碰到 entry-abort，會取消未成交 entry 與止損單並結束任務
   - 若啟動時已存在 entry 單（依偵測模式），entry-abort 本次不生效
+- 關閉 log 檔寫入：--no-log（EVENT 仍會輸出到 stderr）
 
 範例（只跑 trigger/order）：
 rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500
@@ -32,3 +33,6 @@ rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 \
 rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 \
   --entry 70000 --stop 69000 --side long \
   --entry-detect any
+
+範例（關閉 log 檔寫入）：
+rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 --no-log
