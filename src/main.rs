@@ -20,18 +20,27 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{interval, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const WS_URL: &str = "wss://fstream.binance.com/ws/btcusdc@aggTrade";
-const USER_STREAM_WS_BASE_URL: &str = "wss://fstream.binance.com/pm/ws";
-const API_BASE_URL: &str = "https://papi.binance.com";
-const EXCHANGE_BASE_URL: &str = "https://fapi.binance.com";
-const POSITION_RISK_PATH: &str = "/papi/v1/um/positionRisk";
-const OPEN_ORDERS_PATH: &str = "/papi/v1/um/openOrders";
-const ORDER_PATH: &str = "/papi/v1/um/order";
-const CONDITIONAL_ORDER_PATH: &str = "/papi/v1/um/conditional/order";
-const OPEN_CONDITIONAL_ORDERS_PATH: &str = "/papi/v1/um/conditional/openOrders";
-const CONDITIONAL_ORDER_HISTORY_PATH: &str = "/papi/v1/um/conditional/orderHistory";
-const USER_STREAM_LISTEN_KEY_PATH: &str = "/papi/v1/listenKey";
-const EXCHANGE_INFO_PATH: &str = "/fapi/v1/exchangeInfo";
+const FUTURES_WS_BASE_URL: &str = "wss://fstream.binance.com/ws";
+const SPOT_WS_BASE_URL: &str = "wss://stream.binance.com:9443/ws";
+const FUTURES_USER_STREAM_WS_BASE_URL: &str = "wss://fstream.binance.com/pm/ws";
+const SPOT_USER_STREAM_WS_BASE_URL: &str = "wss://stream.binance.com:9443/ws";
+const FUTURES_API_BASE_URL: &str = "https://papi.binance.com";
+const FUTURES_EXCHANGE_BASE_URL: &str = "https://fapi.binance.com";
+const SPOT_API_BASE_URL: &str = "https://api.binance.com";
+const SPOT_EXCHANGE_BASE_URL: &str = "https://api.binance.com";
+const FUTURES_POSITION_RISK_PATH: &str = "/papi/v1/um/positionRisk";
+const FUTURES_OPEN_ORDERS_PATH: &str = "/papi/v1/um/openOrders";
+const FUTURES_ORDER_PATH: &str = "/papi/v1/um/order";
+const FUTURES_CONDITIONAL_ORDER_PATH: &str = "/papi/v1/um/conditional/order";
+const FUTURES_OPEN_CONDITIONAL_ORDERS_PATH: &str = "/papi/v1/um/conditional/openOrders";
+const FUTURES_CONDITIONAL_ORDER_HISTORY_PATH: &str = "/papi/v1/um/conditional/orderHistory";
+const FUTURES_USER_STREAM_LISTEN_KEY_PATH: &str = "/papi/v1/listenKey";
+const FUTURES_EXCHANGE_INFO_PATH: &str = "/fapi/v1/exchangeInfo";
+const SPOT_ACCOUNT_PATH: &str = "/api/v3/account";
+const SPOT_OPEN_ORDERS_PATH: &str = "/api/v3/openOrders";
+const SPOT_ORDER_PATH: &str = "/api/v3/order";
+const SPOT_USER_STREAM_LISTEN_KEY_PATH: &str = "/api/v3/userDataStream";
+const SPOT_EXCHANGE_INFO_PATH: &str = "/api/v3/exchangeInfo";
 const RECV_WINDOW_MS: u64 = 5000;
 const INITIAL_BACKOFF_SECS: u64 = 1;
 const MAX_BACKOFF_SECS: u64 = 32;
@@ -65,6 +74,56 @@ impl TriggerMode {
         match self {
             TriggerMode::Below => "below",
             TriggerMode::Above => "above",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MarketType {
+    Futures,
+    Spot,
+}
+
+impl MarketType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            MarketType::Futures => "futures",
+            MarketType::Spot => "spot",
+        }
+    }
+
+    fn ws_base_url(&self) -> &'static str {
+        match self {
+            MarketType::Futures => FUTURES_WS_BASE_URL,
+            MarketType::Spot => SPOT_WS_BASE_URL,
+        }
+    }
+
+    fn user_stream_ws_base_url(&self) -> &'static str {
+        match self {
+            MarketType::Futures => FUTURES_USER_STREAM_WS_BASE_URL,
+            MarketType::Spot => SPOT_USER_STREAM_WS_BASE_URL,
+        }
+    }
+
+    fn default_api_base_url(&self) -> &'static str {
+        match self {
+            MarketType::Futures => FUTURES_API_BASE_URL,
+            MarketType::Spot => SPOT_API_BASE_URL,
+        }
+    }
+
+    fn default_exchange_base_url(&self) -> &'static str {
+        match self {
+            MarketType::Futures => FUTURES_EXCHANGE_BASE_URL,
+            MarketType::Spot => SPOT_EXCHANGE_BASE_URL,
+        }
+    }
+
+    fn exchange_info_path(&self) -> &'static str {
+        match self {
+            MarketType::Futures => FUTURES_EXCHANGE_INFO_PATH,
+            MarketType::Spot => SPOT_EXCHANGE_INFO_PATH,
         }
     }
 }
@@ -128,6 +187,8 @@ struct EntryConfig {
 }
 
 struct Config {
+    symbol: String,
+    market: MarketType,
     trigger_price: f64,
     order_price: f64,
     order_price_str: String,
@@ -137,6 +198,8 @@ struct Config {
     entry_detect: EntryDetect,
     entry_abort_price: Option<f64>,
     entry_abort_price_str: Option<String>,
+    base_asset: Option<String>,
+    quote_asset: Option<String>,
 }
 
 impl EntryConfig {
@@ -260,6 +323,7 @@ struct BinanceClient {
     api_secret: String,
     base_url: String,
     exchange_base_url: String,
+    market: MarketType,
     logger: Logger,
     rate_limit_state: Arc<StdMutex<RateLimitState>>,
 }
@@ -280,6 +344,18 @@ struct PositionRisk {
     position_side: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct AccountInfo {
+    balances: Vec<AccountBalance>,
+}
+
+#[derive(Deserialize, Debug)]
+struct AccountBalance {
+    asset: String,
+    free: String,
+    locked: String,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct OpenOrder {
     #[serde(rename = "orderId")]
@@ -288,15 +364,18 @@ struct OpenOrder {
     #[serde(rename = "origQty")]
     orig_qty: String,
     #[serde(rename = "reduceOnly")]
+    #[serde(default)]
     reduce_only: bool,
     side: String,
     #[serde(rename = "type")]
     order_type: String,
     #[serde(rename = "positionSide")]
+    #[serde(default)]
     position_side: String,
     #[serde(rename = "clientOrderId")]
     client_order_id: String,
     #[serde(rename = "timeInForce")]
+    #[serde(default)]
     time_in_force: String,
 }
 
@@ -333,6 +412,10 @@ struct ExchangeInfo {
 #[derive(Deserialize, Debug)]
 struct ExchangeSymbol {
     symbol: String,
+    #[serde(rename = "baseAsset", default)]
+    base_asset: String,
+    #[serde(rename = "quoteAsset", default)]
+    quote_asset: String,
     filters: Vec<ExchangeFilter>,
 }
 
@@ -408,7 +491,7 @@ type SharedManager = Arc<AsyncMutex<OrderManager>>;
 
 #[tokio::main]
 async fn main() {
-    let config = match parse_args() {
+    let mut config = match parse_args() {
         Ok(config) => config,
         Err(message) => {
             eprintln!("{message}");
@@ -430,7 +513,9 @@ async fn main() {
         "disabled".to_string()
     };
     logger.event(&format!(
-        "event=start trigger={} order={} mode={} log_enabled={} log_path={}",
+        "event=start symbol={} market={} trigger={} order={} mode={} log_enabled={} log_path={}",
+        config.symbol,
+        config.market.as_str(),
         config.trigger_price,
         config.order_price,
         config.mode.as_str(),
@@ -468,9 +553,10 @@ async fn main() {
         return;
     }
 
-    let base_url = env::var("BINANCE_BASE_URL").unwrap_or_else(|_| API_BASE_URL.to_string());
-    let exchange_base_url =
-        env::var("BINANCE_EXCHANGE_BASE_URL").unwrap_or_else(|_| EXCHANGE_BASE_URL.to_string());
+    let base_url = env::var("BINANCE_BASE_URL")
+        .unwrap_or_else(|_| config.market.default_api_base_url().to_string());
+    let exchange_base_url = env::var("BINANCE_EXCHANGE_BASE_URL")
+        .unwrap_or_else(|_| config.market.default_exchange_base_url().to_string());
     let http = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -488,9 +574,40 @@ async fn main() {
         api_secret,
         base_url,
         exchange_base_url,
+        market: config.market,
         logger: logger.clone(),
         rate_limit_state: Arc::new(StdMutex::new(RateLimitState::new())),
     };
+
+    let symbol_info = match client.fetch_exchange_symbol(&config.symbol).await {
+        Ok(info) => info,
+        Err(err) => {
+            logger.error(&format!(
+                "event=symbol_invalid symbol={} market={} err={err}",
+                config.symbol,
+                config.market.as_str()
+            ));
+            return;
+        }
+    };
+    if !symbol_info.base_asset.trim().is_empty() {
+        config.base_asset = Some(symbol_info.base_asset.clone());
+    }
+    if !symbol_info.quote_asset.trim().is_empty() {
+        config.quote_asset = Some(symbol_info.quote_asset.clone());
+    }
+    if matches!(config.market, MarketType::Spot) && config.base_asset.is_none() {
+        logger.error(&format!(
+            "event=symbol_invalid symbol={} market={} reason=missing_base_asset",
+            config.symbol,
+            config.market.as_str()
+        ));
+        return;
+    }
+
+    let market = config.market;
+    let symbol = config.symbol.clone();
+    let ws_url = format!("{}/{}@aggTrade", market.ws_base_url(), symbol.to_ascii_lowercase());
 
     let manager = Arc::new(AsyncMutex::new(OrderManager::new(
         config,
@@ -501,6 +618,8 @@ async fn main() {
         client.clone(),
         manager.clone(),
         logger.clone(),
+        market,
+        symbol.clone(),
     ));
     let mut backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
     let max_backoff = Duration::from_secs(MAX_BACKOFF_SECS);
@@ -509,12 +628,12 @@ async fn main() {
         if manager.lock().await.exit_requested() {
             break;
         }
-        logger.event(&format!("event=connect_attempt url={WS_URL}"));
-        match connect_async(WS_URL).await {
+        logger.event(&format!("event=connect_attempt url={ws_url}"));
+        match connect_async(&ws_url).await {
             Ok((ws_stream, _)) => {
                 logger.event("event=connected");
                 backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
-                if let Err(err) = stream_last_price(ws_stream, manager.clone()).await {
+                if let Err(err) = stream_last_price(ws_stream, manager.clone(), symbol.clone()).await {
                     logger.error(&format!("event=connection_error err={err}"));
                 }
                 if manager.lock().await.exit_requested() {
@@ -685,7 +804,10 @@ impl OrderManager {
         };
 
         if should_refresh {
-            let snapshot = self.client.get_position(symbol).await?;
+            let snapshot = self
+                .client
+                .get_position(symbol, self.config.base_asset.as_deref())
+                .await?;
             self.last_position = Some(snapshot.clone());
             self.last_position_at = Some(Instant::now());
             self.event_with_price(&format!(
@@ -724,7 +846,11 @@ impl OrderManager {
         symbol: &str,
     ) -> Result<(usize, usize), Box<dyn Error + Send + Sync>> {
         let orders = self.client.get_open_orders(symbol).await?;
-        let conditional_orders = self.client.get_open_conditional_orders(symbol).await?;
+        let conditional_orders = if matches!(self.config.market, MarketType::Futures) {
+            self.client.get_open_conditional_orders(symbol).await?
+        } else {
+            Vec::new()
+        };
 
         let managed_orders: Vec<OpenOrder> = orders
             .into_iter()
@@ -793,13 +919,15 @@ impl OrderManager {
 
         let mut exit_reason: Option<String> = None;
 
-        if let Some(stop_id) = self.stop_client_id.clone() {
-            let history = self
-                .client
-                .get_conditional_order_history(symbol, &stop_id)
-                .await?;
-            if is_conditional_filled(&history) {
-                exit_reason = Some("stop_filled".to_string());
+        if matches!(self.config.market, MarketType::Futures) {
+            if let Some(stop_id) = self.stop_client_id.clone() {
+                let history = self
+                    .client
+                    .get_conditional_order_history(symbol, &stop_id)
+                    .await?;
+                if is_conditional_filled(&history) {
+                    exit_reason = Some("stop_filled".to_string());
+                }
             }
         }
 
@@ -881,23 +1009,42 @@ impl OrderManager {
             return Ok(());
         }
 
-        let expected_qty_str = abs_str(&position.amt_str);
-        let expected_qty = expected_qty_str.parse::<f64>().unwrap_or(0.0);
+        let market = self.config.market;
+        let mut expected_qty_str = abs_str(&position.amt_str);
+        let mut expected_qty = expected_qty_str.parse::<f64>().unwrap_or(0.0);
+        if matches!(market, MarketType::Spot) {
+            self.ensure_symbol_filters(symbol).await?;
+            if let Some(filters) = &self.symbol_filters {
+                let (rounded_qty, rounded_str) = filters.round_qty(expected_qty);
+                if rounded_qty <= f64::EPSILON {
+                    self.event_with_price(&format!(
+                        "event=manage_skip symbol={symbol} reason=qty_too_small"
+                    ));
+                    return Ok(());
+                }
+                expected_qty = rounded_qty;
+                expected_qty_str = rounded_str;
+            }
+        }
         let expected_side = if position.amt > 0.0 { "SELL" } else { "BUY" };
         let expected_position_side = position.position_side.as_str();
 
         if active {
             let orders = self.get_open_orders_cached(symbol).await?;
-            let reduce_orders: Vec<OpenOrder> = orders
+            let managed_orders: Vec<OpenOrder> = orders
                 .into_iter()
-                .filter(|o| o.reduce_only && o.client_order_id.starts_with(CLIENT_ID_PREFIX))
+                .filter(|o| {
+                    o.client_order_id.starts_with(CLIENT_ID_PREFIX)
+                        && (matches!(market, MarketType::Spot) || o.reduce_only)
+                })
                 .collect();
-            self.tp_client_id = reduce_orders.first().map(|o| o.client_order_id.clone());
+            self.tp_client_id = managed_orders.first().map(|o| o.client_order_id.clone());
             let mut has_expected = false;
 
-            for order in &reduce_orders {
+            for order in &managed_orders {
                 if is_expected_order(
                     order,
+                    market,
                     expected_side,
                     expected_position_side,
                     expected_qty,
@@ -910,7 +1057,7 @@ impl OrderManager {
                 break;
             }
 
-            if has_expected && reduce_orders.len() == 1 {
+            if has_expected && managed_orders.len() == 1 {
                 self.event_with_price(&format!(
                     "event=orders_ok symbol={symbol} price={} qty={}",
                     self.config.order_price_str, expected_qty_str
@@ -918,12 +1065,12 @@ impl OrderManager {
                 return Ok(());
             }
 
-            if !reduce_orders.is_empty() {
+            if !managed_orders.is_empty() {
                 self.event_with_price(&format!(
                     "event=cancel_orders symbol={symbol} count={}",
-                    reduce_orders.len()
+                    managed_orders.len()
                 ));
-                self.cancel_orders(symbol, &reduce_orders).await?;
+                self.cancel_orders(symbol, &managed_orders).await?;
                 self.tp_client_id = None;
             }
 
@@ -951,17 +1098,20 @@ impl OrderManager {
             self.tp_client_id = Some(order.client_order_id);
         } else {
             let orders = self.get_open_orders_cached(symbol).await?;
-            let reduce_orders: Vec<OpenOrder> = orders
+            let managed_orders: Vec<OpenOrder> = orders
                 .into_iter()
-                .filter(|o| o.reduce_only && o.client_order_id.starts_with(CLIENT_ID_PREFIX))
+                .filter(|o| {
+                    o.client_order_id.starts_with(CLIENT_ID_PREFIX)
+                        && (matches!(market, MarketType::Spot) || o.reduce_only)
+                })
                 .collect();
 
-            if !reduce_orders.is_empty() {
+            if !managed_orders.is_empty() {
                 self.event_with_price(&format!(
                     "event=cancel_orders symbol={symbol} count={}",
-                    reduce_orders.len()
+                    managed_orders.len()
                 ));
-                self.cancel_orders(symbol, &reduce_orders).await?;
+                self.cancel_orders(symbol, &managed_orders).await?;
                 self.tp_client_id = None;
             } else {
                 self.event_with_price(&format!(
@@ -978,6 +1128,9 @@ impl OrderManager {
         symbol: &str,
         price: f64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if matches!(self.config.market, MarketType::Spot) {
+            return Ok(());
+        }
         let entry_detect = self.config.entry_detect;
         let entry = match self.config.entry.clone() {
             Some(entry) => entry,
@@ -1341,63 +1494,113 @@ impl OrderManager {
 }
 
 impl BinanceClient {
-    async fn get_position(&self, symbol: &str) -> Result<PositionSnapshot, Box<dyn Error + Send + Sync>> {
-        let params = vec![("symbol".to_string(), symbol.to_string())];
-        let positions: Vec<PositionRisk> =
-            self.signed_request(Method::GET, POSITION_RISK_PATH, params)
-                .await?;
+    async fn get_position(
+        &self,
+        symbol: &str,
+        base_asset: Option<&str>,
+    ) -> Result<PositionSnapshot, Box<dyn Error + Send + Sync>> {
+        match self.market {
+            MarketType::Futures => {
+                let params = vec![("symbol".to_string(), symbol.to_string())];
+                let positions: Vec<PositionRisk> = self
+                    .signed_request(Method::GET, FUTURES_POSITION_RISK_PATH, params)
+                    .await?;
 
-        let position = positions
-            .into_iter()
-            .find(|pos| pos.symbol == symbol)
-            .unwrap_or(PositionRisk {
-                symbol: symbol.to_string(),
-                position_amt: "0".to_string(),
-                position_side: "BOTH".to_string(),
-            });
+                let position = positions
+                    .into_iter()
+                    .find(|pos| pos.symbol == symbol)
+                    .unwrap_or(PositionRisk {
+                        symbol: symbol.to_string(),
+                        position_amt: "0".to_string(),
+                        position_side: "BOTH".to_string(),
+                    });
 
-        let amt = position.position_amt.parse::<f64>().unwrap_or(0.0);
-        Ok(PositionSnapshot {
-            amt,
-            amt_str: position.position_amt,
-            position_side: position.position_side,
-        })
+                let amt = position.position_amt.parse::<f64>().unwrap_or(0.0);
+                Ok(PositionSnapshot {
+                    amt,
+                    amt_str: position.position_amt,
+                    position_side: position.position_side,
+                })
+            }
+            MarketType::Spot => {
+                let base_asset = base_asset.ok_or("spot base asset missing")?;
+                let account: AccountInfo =
+                    self.signed_request(Method::GET, SPOT_ACCOUNT_PATH, Vec::new())
+                        .await?;
+                let balance = account
+                    .balances
+                    .into_iter()
+                    .find(|item| item.asset == base_asset)
+                    .unwrap_or(AccountBalance {
+                        asset: base_asset.to_string(),
+                        free: "0".to_string(),
+                        locked: "0".to_string(),
+                    });
+                let free = balance.free.parse::<f64>().unwrap_or(0.0);
+                let locked = balance.locked.parse::<f64>().unwrap_or(0.0);
+                let total = free + locked;
+                Ok(PositionSnapshot {
+                    amt: total,
+                    amt_str: format_qty(total),
+                    position_side: "BOTH".to_string(),
+                })
+            }
+        }
     }
 
-    async fn get_open_orders(&self, symbol: &str) -> Result<Vec<OpenOrder>, Box<dyn Error + Send + Sync>> {
+    async fn get_open_orders(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<OpenOrder>, Box<dyn Error + Send + Sync>> {
         let params = vec![("symbol".to_string(), symbol.to_string())];
-        self.signed_request(Method::GET, OPEN_ORDERS_PATH, params)
-            .await
+        let path = match self.market {
+            MarketType::Futures => FUTURES_OPEN_ORDERS_PATH,
+            MarketType::Spot => SPOT_OPEN_ORDERS_PATH,
+        };
+        self.signed_request(Method::GET, path, params).await
     }
 
     async fn get_open_conditional_orders(
         &self,
         symbol: &str,
     ) -> Result<Vec<ConditionalOrder>, Box<dyn Error + Send + Sync>> {
+        if matches!(self.market, MarketType::Spot) {
+            return Ok(Vec::new());
+        }
         let params = vec![("symbol".to_string(), symbol.to_string())];
-        self.signed_request(Method::GET, OPEN_CONDITIONAL_ORDERS_PATH, params)
+        self.signed_request(Method::GET, FUTURES_OPEN_CONDITIONAL_ORDERS_PATH, params)
             .await
     }
 
     async fn start_user_stream(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
-        let response: ListenKeyResponse =
-            self.api_key_request(Method::POST, USER_STREAM_LISTEN_KEY_PATH, Vec::new())
-                .await?;
+        let path = match self.market {
+            MarketType::Futures => FUTURES_USER_STREAM_LISTEN_KEY_PATH,
+            MarketType::Spot => SPOT_USER_STREAM_LISTEN_KEY_PATH,
+        };
+        let response: ListenKeyResponse = self
+            .api_key_request(Method::POST, path, Vec::new())
+            .await?;
         Ok(response.listen_key)
     }
 
     async fn keepalive_user_stream(&self, listen_key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = match self.market {
+            MarketType::Futures => FUTURES_USER_STREAM_LISTEN_KEY_PATH,
+            MarketType::Spot => SPOT_USER_STREAM_LISTEN_KEY_PATH,
+        };
         let params = vec![("listenKey".to_string(), listen_key.to_string())];
-        let _: Value = self
-            .api_key_request(Method::PUT, USER_STREAM_LISTEN_KEY_PATH, params)
-            .await?;
+        let _: Value = self.api_key_request(Method::PUT, path, params).await?;
         Ok(())
     }
 
     async fn close_user_stream(&self, listen_key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = match self.market {
+            MarketType::Futures => FUTURES_USER_STREAM_LISTEN_KEY_PATH,
+            MarketType::Spot => SPOT_USER_STREAM_LISTEN_KEY_PATH,
+        };
         let params = vec![("listenKey".to_string(), listen_key.to_string())];
         let _: Value = self
-            .api_key_request(Method::DELETE, USER_STREAM_LISTEN_KEY_PATH, params)
+            .api_key_request(Method::DELETE, path, params)
             .await?;
         Ok(())
     }
@@ -1414,7 +1617,11 @@ impl BinanceClient {
                 client_order_id.to_string(),
             ),
         ];
-        self.signed_request(Method::GET, ORDER_PATH, params).await
+        let path = match self.market {
+            MarketType::Futures => FUTURES_ORDER_PATH,
+            MarketType::Spot => SPOT_ORDER_PATH,
+        };
+        self.signed_request(Method::GET, path, params).await
     }
 
     async fn get_conditional_order_history(
@@ -1429,7 +1636,10 @@ impl BinanceClient {
                 client_strategy_id.to_string(),
             ),
         ];
-        self.signed_request(Method::GET, CONDITIONAL_ORDER_HISTORY_PATH, params)
+        if matches!(self.market, MarketType::Spot) {
+            return Err("spot conditional order history not supported".into());
+        }
+        self.signed_request(Method::GET, FUTURES_CONDITIONAL_ORDER_HISTORY_PATH, params)
             .await
     }
 
@@ -1442,26 +1652,43 @@ impl BinanceClient {
         position_side: &str,
         client_order_id: &str,
     ) -> Result<OrderAck, Box<dyn Error + Send + Sync>> {
-        let mut params = vec![
-            ("symbol".to_string(), symbol.to_string()),
-            ("side".to_string(), side.to_string()),
-            ("type".to_string(), "LIMIT".to_string()),
-            ("timeInForce".to_string(), "GTX".to_string()),
-            ("quantity".to_string(), quantity.to_string()),
-            ("price".to_string(), price.to_string()),
-            ("reduceOnly".to_string(), "true".to_string()),
-            (
-                "newClientOrderId".to_string(),
-                client_order_id.to_string(),
-            ),
-        ];
+        let (path, params) = match self.market {
+            MarketType::Futures => {
+                let mut params = vec![
+                    ("symbol".to_string(), symbol.to_string()),
+                    ("side".to_string(), side.to_string()),
+                    ("type".to_string(), "LIMIT".to_string()),
+                    ("timeInForce".to_string(), "GTX".to_string()),
+                    ("quantity".to_string(), quantity.to_string()),
+                    ("price".to_string(), price.to_string()),
+                    ("reduceOnly".to_string(), "true".to_string()),
+                    (
+                        "newClientOrderId".to_string(),
+                        client_order_id.to_string(),
+                    ),
+                ];
+                if position_side != "BOTH" {
+                    params.push(("positionSide".to_string(), position_side.to_string()));
+                }
+                (FUTURES_ORDER_PATH, params)
+            }
+            MarketType::Spot => {
+                let params = vec![
+                    ("symbol".to_string(), symbol.to_string()),
+                    ("side".to_string(), side.to_string()),
+                    ("type".to_string(), "LIMIT_MAKER".to_string()),
+                    ("quantity".to_string(), quantity.to_string()),
+                    ("price".to_string(), price.to_string()),
+                    (
+                        "newClientOrderId".to_string(),
+                        client_order_id.to_string(),
+                    ),
+                ];
+                (SPOT_ORDER_PATH, params)
+            }
+        };
 
-        if position_side != "BOTH" {
-            params.push(("positionSide".to_string(), position_side.to_string()));
-        }
-
-        self.signed_request(Method::POST, ORDER_PATH, params)
-            .await
+        self.signed_request(Method::POST, path, params).await
     }
 
     async fn place_entry_limit(
@@ -1472,6 +1699,9 @@ impl BinanceClient {
         price: &str,
         client_order_id: &str,
     ) -> Result<OrderAck, Box<dyn Error + Send + Sync>> {
+        if matches!(self.market, MarketType::Spot) {
+            return Err("spot entry orders not supported".into());
+        }
         let params = vec![
             ("symbol".to_string(), symbol.to_string()),
             ("side".to_string(), side.to_string()),
@@ -1485,7 +1715,7 @@ impl BinanceClient {
             ),
         ];
 
-        self.signed_request(Method::POST, ORDER_PATH, params)
+        self.signed_request(Method::POST, FUTURES_ORDER_PATH, params)
             .await
     }
 
@@ -1498,6 +1728,9 @@ impl BinanceClient {
         position_side: Option<&str>,
         client_order_id: &str,
     ) -> Result<OrderAck, Box<dyn Error + Send + Sync>> {
+        if matches!(self.market, MarketType::Spot) {
+            return Err("spot stop orders not supported".into());
+        }
         let mut params = vec![
             ("symbol".to_string(), symbol.to_string()),
             ("side".to_string(), side.to_string()),
@@ -1516,7 +1749,7 @@ impl BinanceClient {
             params.push(("positionSide".to_string(), position_side.to_string()));
         }
 
-        self.signed_request(Method::POST, CONDITIONAL_ORDER_PATH, params)
+        self.signed_request(Method::POST, FUTURES_CONDITIONAL_ORDER_PATH, params)
             .await
     }
 
@@ -1529,8 +1762,12 @@ impl BinanceClient {
             ("symbol".to_string(), symbol.to_string()),
             ("orderId".to_string(), order_id.to_string()),
         ];
+        let path = match self.market {
+            MarketType::Futures => FUTURES_ORDER_PATH,
+            MarketType::Spot => SPOT_ORDER_PATH,
+        };
         let _: Value = self
-            .signed_request(Method::DELETE, ORDER_PATH, params)
+            .signed_request(Method::DELETE, path, params)
             .await?;
         Ok(())
     }
@@ -1540,12 +1777,15 @@ impl BinanceClient {
         symbol: &str,
         strategy_id: u64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if matches!(self.market, MarketType::Spot) {
+            return Err("spot conditional order cancel not supported".into());
+        }
         let params = vec![
             ("symbol".to_string(), symbol.to_string()),
             ("strategyId".to_string(), strategy_id.to_string()),
         ];
         let _: Value = self
-            .signed_request(Method::DELETE, CONDITIONAL_ORDER_PATH, params)
+            .signed_request(Method::DELETE, FUTURES_CONDITIONAL_ORDER_PATH, params)
             .await?;
         Ok(())
     }
@@ -1554,21 +1794,7 @@ impl BinanceClient {
         &self,
         symbol: &str,
     ) -> Result<SymbolFilters, Box<dyn Error + Send + Sync>> {
-        let params = vec![("symbol".to_string(), symbol.to_string())];
-        let info: ExchangeInfo = self
-            .request_with_backoff_base(
-                &self.exchange_base_url,
-                Method::GET,
-                EXCHANGE_INFO_PATH,
-                params,
-                false,
-            )
-            .await?;
-        let symbol_info = info
-            .symbols
-            .into_iter()
-            .find(|item| item.symbol == symbol)
-            .ok_or_else(|| format!("exchange info missing symbol {symbol}"))?;
+        let symbol_info = self.fetch_exchange_symbol(symbol).await?;
         let lot_filter = symbol_info
             .filters
             .into_iter()
@@ -1581,6 +1807,26 @@ impl BinanceClient {
             lot_precision: precision,
             lot_step_units: step_units,
         })
+    }
+
+    async fn fetch_exchange_symbol(
+        &self,
+        symbol: &str,
+    ) -> Result<ExchangeSymbol, Box<dyn Error + Send + Sync>> {
+        let params = vec![("symbol".to_string(), symbol.to_string())];
+        let info: ExchangeInfo = self
+            .request_with_backoff_base(
+                &self.exchange_base_url,
+                Method::GET,
+                self.market.exchange_info_path(),
+                params,
+                false,
+            )
+            .await?;
+        info.symbols
+            .into_iter()
+            .find(|item| item.symbol == symbol)
+            .ok_or_else(|| format!("exchange info missing symbol {symbol}").into())
     }
 
     fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1806,7 +2052,13 @@ impl BinanceClient {
     }
 }
 
-async fn run_user_stream(client: BinanceClient, manager: SharedManager, logger: Logger) {
+async fn run_user_stream(
+    client: BinanceClient,
+    manager: SharedManager,
+    logger: Logger,
+    market: MarketType,
+    symbol: String,
+) {
     let mut backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
     let max_backoff = Duration::from_secs(MAX_BACKOFF_SECS);
 
@@ -1828,14 +2080,23 @@ async fn run_user_stream(client: BinanceClient, manager: SharedManager, logger: 
             }
         };
 
-        let ws_url = format!("{USER_STREAM_WS_BASE_URL}/{listen_key}");
+        let ws_url = format!("{}/{}", market.user_stream_ws_base_url(), listen_key);
         logger.event("event=user_stream_connect");
         match connect_async(&ws_url).await {
             Ok((ws_stream, _)) => {
                 logger.event("event=user_stream_connected");
                 backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
                 if let Err(err) =
-                    stream_user_data(ws_stream, &client, &manager, &logger, &listen_key).await
+                    stream_user_data(
+                        ws_stream,
+                        &client,
+                        &manager,
+                        &logger,
+                        market,
+                        &symbol,
+                        &listen_key,
+                    )
+                    .await
                 {
                     logger.error(&format!("event=user_stream_error err={err}"));
                 }
@@ -1867,6 +2128,8 @@ async fn stream_user_data(
     client: &BinanceClient,
     manager: &SharedManager,
     logger: &Logger,
+    market: MarketType,
+    symbol: &str,
     listen_key: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (mut write, mut read) = ws_stream.split();
@@ -1887,13 +2150,15 @@ async fn stream_user_data(
                                     return Ok(());
                                 }
                             }
-                            if let Some((symbol, reason)) = parse_user_stream_exit(&value) {
-                                let mut guard = manager.lock().await;
-                                if let Err(err) = guard.exit_with_reason(&symbol, &reason, "ws").await {
-                                    logger.error(&format!("event=exit_ws_error err={err}"));
-                                }
-                                if guard.exit_requested() {
-                                    return Ok(());
+                            if let Some((event_symbol, reason)) = parse_user_stream_exit(&value, market) {
+                                if event_symbol == symbol {
+                                    let mut guard = manager.lock().await;
+                                    if let Err(err) = guard.exit_with_reason(&event_symbol, &reason, "ws").await {
+                                        logger.error(&format!("event=exit_ws_error err={err}"));
+                                    }
+                                    if guard.exit_requested() {
+                                        return Ok(());
+                                    }
                                 }
                             }
                         }
@@ -1936,6 +2201,7 @@ async fn stream_user_data(
 async fn stream_last_price(
     ws_stream: WsStream,
     manager: SharedManager,
+    symbol: String,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (mut write, mut read) = ws_stream.split();
     let mut ping_interval = interval(Duration::from_secs(PING_INTERVAL_SECS));
@@ -1945,7 +2211,10 @@ async fn stream_last_price(
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Some((symbol, price, event_time)) = parse_trade_event(&text) {
+                        if let Some((event_symbol, price, event_time)) = parse_trade_event(&text) {
+                            if !event_symbol.eq_ignore_ascii_case(&symbol) {
+                                continue;
+                            }
                             if let Ok(price_value) = price.parse::<f64>() {
                                 let mut guard = manager.lock().await;
                                 guard.handle_tick(&symbol, &price, price_value, event_time).await;
@@ -2010,6 +2279,7 @@ fn abs_str(value: &str) -> String {
 
 fn is_expected_order(
     order: &OpenOrder,
+    market: MarketType,
     side: &str,
     position_side: &str,
     qty: f64,
@@ -2019,12 +2289,20 @@ fn is_expected_order(
         return false;
     }
 
-    if order.time_in_force != "GTX" {
-        return false;
-    }
-
-    if position_side != "BOTH" && order.position_side != position_side {
-        return false;
+    match market {
+        MarketType::Futures => {
+            if order.time_in_force != "GTX" {
+                return false;
+            }
+            if position_side != "BOTH" && order.position_side != position_side {
+                return false;
+            }
+        }
+        MarketType::Spot => {
+            if order.order_type != "LIMIT_MAKER" {
+                return false;
+            }
+        }
     }
 
     let order_price = order.price.parse::<f64>().unwrap_or(0.0);
@@ -2131,36 +2409,53 @@ fn is_conditional_ws_filled_status(status: &str) -> bool {
     matches!(status, "TRIGGERED" | "FILLED")
 }
 
-fn parse_user_stream_exit(value: &Value) -> Option<(String, String)> {
+fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, String)> {
     let event_type = value.get("e")?.as_str()?;
-    match event_type {
-        "ORDER_TRADE_UPDATE" => {
-            let order = value.get("o")?;
-            let client_id = order.get("c")?.as_str()?;
+    match market {
+        MarketType::Futures => match event_type {
+            "ORDER_TRADE_UPDATE" => {
+                let order = value.get("o")?;
+                let client_id = order.get("c")?.as_str()?;
+                if !client_id.starts_with(CLIENT_ID_PREFIX) {
+                    return None;
+                }
+                let status = order.get("X")?.as_str()?;
+                if status != "FILLED" {
+                    return None;
+                }
+                let symbol = order.get("s")?.as_str()?.to_string();
+                Some((symbol, "tp_filled".to_string()))
+            }
+            "CONDITIONAL_ORDER_TRADE_UPDATE" => {
+                let order = value.get("so")?;
+                let client_id = order.get("c")?.as_str()?;
+                if !client_id.starts_with(STOP_CLIENT_ID_PREFIX) {
+                    return None;
+                }
+                let status = order.get("os")?.as_str()?;
+                if !is_conditional_ws_filled_status(status) {
+                    return None;
+                }
+                let symbol = order.get("s")?.as_str()?.to_string();
+                Some((symbol, "stop_filled".to_string()))
+            }
+            _ => None,
+        },
+        MarketType::Spot => {
+            if event_type != "executionReport" {
+                return None;
+            }
+            let client_id = value.get("c")?.as_str()?;
             if !client_id.starts_with(CLIENT_ID_PREFIX) {
                 return None;
             }
-            let status = order.get("X")?.as_str()?;
+            let status = value.get("X")?.as_str()?;
             if status != "FILLED" {
                 return None;
             }
-            let symbol = order.get("s")?.as_str()?.to_string();
-            Some((symbol, "tp_filled".to_string()))
+            let symbol = value.get("s")?.as_str()?.to_string();
+            Some((symbol, "order_filled".to_string()))
         }
-        "CONDITIONAL_ORDER_TRADE_UPDATE" => {
-            let order = value.get("so")?;
-            let client_id = order.get("c")?.as_str()?;
-            if !client_id.starts_with(STOP_CLIENT_ID_PREFIX) {
-                return None;
-            }
-            let status = order.get("os")?.as_str()?;
-            if !is_conditional_ws_filled_status(status) {
-                return None;
-            }
-            let symbol = order.get("s")?.as_str()?.to_string();
-            Some((symbol, "stop_filled".to_string()))
-        }
-        _ => None,
     }
 }
 
@@ -2297,6 +2592,32 @@ fn entry_detect_from_env() -> Option<String> {
     env::var("RB_ENTRY_DETECT").ok()
 }
 
+fn normalize_symbol(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut output = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_uppercase());
+        }
+    }
+    if output.is_empty() {
+        None
+    } else {
+        Some(output)
+    }
+}
+
+fn parse_market(value: &str) -> Option<MarketType> {
+    match value.to_ascii_lowercase().as_str() {
+        "futures" | "future" => Some(MarketType::Futures),
+        "spot" => Some(MarketType::Spot),
+        _ => None,
+    }
+}
+
 fn parse_entry_side(value: &str) -> Option<EntrySide> {
     match value.to_ascii_lowercase().as_str() {
         "long" => Some(EntrySide::Long),
@@ -2314,6 +2635,8 @@ fn parse_entry_detect(value: &str) -> Option<EntryDetect> {
 }
 
 fn parse_args() -> Result<Config, String> {
+    let mut symbol_input: Option<String> = None;
+    let mut market_input: Option<String> = None;
     let mut trigger_price: Option<String> = None;
     let mut order_price: Option<String> = None;
     let mut entry_price: Option<String> = None;
@@ -2328,6 +2651,8 @@ fn parse_args() -> Result<Config, String> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--symbol" => symbol_input = args.next(),
+            "--market" => market_input = args.next(),
             "--trigger" => trigger_price = args.next(),
             "--order" => order_price = args.next(),
             "--entry" => entry_price = args.next(),
@@ -2342,6 +2667,15 @@ fn parse_args() -> Result<Config, String> {
             _ => return Err(usage()),
         }
     }
+
+    let symbol_raw = symbol_input
+        .ok_or_else(|| "symbol is required\n".to_string() + &usage())?;
+    let symbol = normalize_symbol(&symbol_raw)
+        .ok_or_else(|| "invalid symbol format\n".to_string() + &usage())?;
+    let market_raw = market_input
+        .ok_or_else(|| "market is required\n".to_string() + &usage())?;
+    let market = parse_market(&market_raw)
+        .ok_or_else(|| "market must be futures or spot\n".to_string() + &usage())?;
 
     let trigger_str = trigger_price.ok_or_else(usage)?;
     let order_str = order_price.ok_or_else(usage)?;
@@ -2434,7 +2768,13 @@ fn parse_args() -> Result<Config, String> {
         None => None,
     };
 
+    if matches!(market, MarketType::Spot) && entry.is_some() {
+        return Err("spot does not support entry/stop options\n".to_string() + &usage());
+    }
+
     Ok(Config {
+        symbol,
+        market,
         trigger_price: trigger,
         order_price: order,
         order_price_str: order_str,
@@ -2444,17 +2784,20 @@ fn parse_args() -> Result<Config, String> {
         entry_detect,
         entry_abort_price: entry_abort_parsed.as_ref().map(|(price, _)| *price),
         entry_abort_price_str: entry_abort_parsed.map(|(_, value)| value),
+        base_asset: None,
+        quote_asset: None,
     })
 }
 
 fn usage() -> String {
     [
         "usage:",
-        "  rb --trigger <price> --order <price> [--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]] [--no-log]",
+        "  rb --symbol <pair> --market <futures|spot> --trigger <price> --order <price> [--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]] [--no-log]",
+        "  note: entry/stop options are supported for futures only",
         "env:",
-        "  BINANCE_API_KEY=... BINANCE_API_SECRET=... [BINANCE_BASE_URL=https://papi.binance.com] [RB_LOG_PATH=rb.log] [RB_ENTRY_USDC=<amount>] [RB_ENTRY_LEVERAGE=100] [RB_ENTRY_DETECT=prefix|any]",
+        "  BINANCE_API_KEY=... BINANCE_API_SECRET=... [BINANCE_BASE_URL=<market default>] [BINANCE_EXCHANGE_BASE_URL=<market default>] [RB_LOG_PATH=rb.log] [RB_ENTRY_USDC=<amount>] [RB_ENTRY_LEVERAGE=100] [RB_ENTRY_DETECT=prefix|any]",
         "example:",
-        "  BINANCE_API_KEY=... BINANCE_API_SECRET=... RB_LOG_PATH=rb.log rb --trigger 70000 --order 70500",
+        "  BINANCE_API_KEY=... BINANCE_API_SECRET=... RB_LOG_PATH=rb.log rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500",
     ]
     .join("\n")
 }

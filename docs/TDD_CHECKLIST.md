@@ -1,6 +1,8 @@
 # TDD Checklist
 
 - [ ] Reject missing/invalid `--trigger` or `--order` arguments.
+- [ ] Reject missing/invalid `--symbol` or `--market` arguments.
+- [ ] Validate symbol existence for the selected market before running.
 - [ ] Trigger logic flips when order price is above/below trigger price.
 - [ ] Reduce-only maker order uses `GTX` and opposite side of the position.
 - [ ] Cancel reduce-only orders when trigger condition is inactive.
@@ -9,7 +11,9 @@
 - [ ] Log file appends EVENT lines at `RB_LOG_PATH` (default `rb.log`) unless `--no-log` is set.
 - [ ] Order/position EVENT logs include `current_price=<last_price>` when available.
 - [ ] Warn on startup when trigger/order gap is >= 10%.
-- [ ] REST requests use Unified account PAPI UM endpoints by default.
+- [ ] REST requests use market-specific base URLs (PAPI UM for futures, spot API for spot).
+- [ ] Spot mode uses spot REST endpoints and `LIMIT_MAKER` take-profit orders.
+- [ ] Spot mode rejects entry/stop options.
 - [ ] Open orders are cached briefly to avoid duplicate REST calls within a manage cycle.
 - [ ] Open order cache is cleared after order placement/cancellation to prevent stale decisions.
 - [ ] Rate-limit headers are logged periodically when available.

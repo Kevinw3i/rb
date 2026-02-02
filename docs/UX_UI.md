@@ -1,12 +1,16 @@
 # UX/UI
 
 ## CLI Output
-- Stdout format: `BTCUSDC / <last_price> / <YYYY-MM-DD HH:MM:SS> / <position>`
+- Stdout format: `<SYMBOL> / <last_price> / <YYYY-MM-DD HH:MM:SS> / <position>`
 - Timezone: UTC+8.
 - Position text: `LONG <qty>`, `SHORT <qty>`, or `FLAT`.
 
+## Startup Requirements
+- Must provide `--symbol <pair>` and `--market <futures|spot>`.
+- Startup validates the symbol exists for the selected market; invalid symbols exit with a warning.
+
 ## Entry Options
-- Optional entry/stop inputs: `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]`.
+- Optional entry/stop inputs (futures only): `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]`.
 - Entry order size is derived from USDC amount and leverage (default 100), then floored to the LOT_SIZE step from exchange info.
 - When both entry USDC and leverage are provided, startup cancels same-price entry/stop orders before re-placing them with the computed rounded quantity.
 - Entry is single-use: once a position is opened, no new entry orders are placed.
@@ -25,4 +29,4 @@
 - Startup entry cleanup logs `entry_startup_cleanup` with counts when same-price orders are canceled.
 - Exit events include `event=exit` and `event=exit_done`.
 - User data stream events include `user_stream_start`, `user_stream_connected`, `user_stream_keepalive`, `user_stream_expired`.
-- REST calls default to Unified account (`https://papi.binance.com`).
+- REST calls default to the selected market's base URL (PAPI UM for futures, spot API for spot).
