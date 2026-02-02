@@ -11,6 +11,9 @@ cargo run -- --trigger 95450 --order 93658.7
 - 偵測模式：--entry-detect <prefix|any> 或 RB_ENTRY_DETECT（預設 prefix）
   - prefix：只認 clientOrderId 為 rb-entry- 的單
   - any：符合 entry 價格/方向的 LIMIT 單都當成 entry（可偵測網頁下單）
+- 取消門檻：--entry-abort <price>（需搭配 entry/stop/side）
+  - entry 未成交前若價格先觸碰到 entry-abort，會取消未成交 entry 與止損單並結束任務
+  - 若啟動時已存在 entry 單（依偵測模式），entry-abort 本次不生效
 
 範例（只跑 trigger/order）：
 rb --trigger 70000 --order 70500

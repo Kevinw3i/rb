@@ -39,6 +39,8 @@
 - Rate-limit headers are logged periodically when provided by the API.
 - 429/418 responses trigger a backoff before retry.
 - Stop-loss/take-profit fills trigger an exit after canceling remaining managed orders.
+- If `--entry-abort` is set and price reaches that level before entry fills, entry/stop orders are canceled and the task exits.
+- If an entry order already exists at startup (per entry detection), `--entry-abort` is ignored for this run.
 
 ## Order Detection
 - Entry detection mode `prefix` (default) only treats `rb-entry-` orders as entry orders.

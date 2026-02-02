@@ -22,6 +22,8 @@
 - [ ] Entry order placement requires entry USDC amount; leverage defaults to 100.
 - [ ] When entry USDC and leverage are provided, startup cancels same-price entry/stop orders before placing refreshed orders.
 - [ ] Once a position is opened, no new entry orders are placed.
+- [ ] If `--entry-abort` is set and price reaches that level before entry fills, cancel open entry/stop orders and exit.
+- [ ] If an entry order already exists at startup (per entry detection), ignore `--entry-abort`.
 - [ ] Stop-loss uses reduce-only STOP_MARKET at `--stop` with latest price trigger (CONTRACT_PRICE) via conditional order endpoint and open-conditional tracking.
 - [ ] Stop-loss quantity uses current position size or entry order quantity when flat.
 - [ ] Entry/stop management does not interfere with trigger/order reduce-only logic.

@@ -73,3 +73,11 @@
 23. Entry single-use
    - Let the entry order fill once and the position open.
    - Expect no new entry orders to be placed while the bot continues running.
+24. Entry abort touched before fill
+   - Configure entry/stop and set `--entry-abort` beyond the entry price.
+   - Before the entry fills, let price reach the abort price.
+   - Expect entry orders and stop-loss orders to be canceled and the task to exit.
+25. Entry abort ignored with existing entry order
+   - Place an entry LIMIT order that matches detection mode before starting the bot.
+   - Run with `--entry-abort`.
+   - Expect `entry_abort` to be ignored (no abort on price touch).

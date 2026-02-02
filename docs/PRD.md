@@ -8,7 +8,7 @@
 - Optionally manage a maker-only entry order and a reduce-only stop-loss flow.
 
 ## Inputs
-- CLI: `--trigger <price>`, `--order <price>`, optional `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>]`, optional `--no-log` to disable log file writes.
+- CLI: `--trigger <price>`, `--order <price>`, optional `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]`, optional `--no-log` to disable log file writes.
 - Environment: `BINANCE_API_KEY`, `BINANCE_API_SECRET`, optional `BINANCE_BASE_URL` (default `https://papi.binance.com`), optional `BINANCE_EXCHANGE_BASE_URL` (default `https://fapi.binance.com`), optional `RB_LOG_PATH` (default `rb.log`), optional `RB_ENTRY_USDC` (entry notional), optional `RB_ENTRY_LEVERAGE` (default 100), optional `RB_ENTRY_DETECT` (`prefix` or `any`).
 - `--entry/--stop/--side` must be provided together; entry order placement requires an entry USDC amount.
 
@@ -31,6 +31,8 @@
   - Entry quantity is floored to the symbol LOT_SIZE step from exchange info; raw vs rounded qty is logged, and placement is skipped if the rounded qty is zero.
   - When both `entry_usdc` and `leverage` are provided, the first manage cycle cancels same-price entry/stop orders (matching side) before placing fresh orders with the computed rounded quantity.
   - Entry is single-use: once a position is opened, no new entry orders are placed.
+  - If `--entry-abort` is set and the latest price reaches that price before entry fills (above if abort >= entry, below if abort < entry), cancel open entry/stop orders and exit.
+  - If an entry order already exists at startup (per entry detection), `--entry-abort` is ignored for this run.
   - When the entry order is open or a position exists, ensure a reduce-only STOP_MARKET stop-loss at `--stop`.
   - Stop-loss uses UM conditional orders and is tracked via open conditional orders (strategyId/newClientStrategyId).
   - Stop-loss trigger uses the latest price (CONTRACT_PRICE), reduce-only = true, maker-only = false.

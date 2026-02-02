@@ -11,6 +11,8 @@
 - Entry order sizing uses entry USDC amount and leverage (default 100) and is floored to the LOT_SIZE step; missing amount skips entry placement if no entry order exists.
 - When entry USDC and leverage are provided, startup cancels same-price entry/stop orders once before placing refreshed orders.
 - Entry is single-use: once a position is opened, no new entry orders are placed.
+- If `--entry-abort` is set and price reaches that level before entry fills, entry/stop orders are canceled and the task exits.
+- If an entry order already exists at startup (per entry detection), `--entry-abort` is ignored.
 - Stop-loss quantity prefers the updated computed entry size when entry orders are replaced.
 - Entry detection defaults to prefix and supports `any` for matching web LIMIT orders.
 - Open orders are cached briefly to reduce duplicate REST calls.

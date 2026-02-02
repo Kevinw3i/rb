@@ -135,6 +135,8 @@ struct Config {
     log_enabled: bool,
     entry: Option<EntryConfig>,
     entry_detect: EntryDetect,
+    entry_abort_price: Option<f64>,
+    entry_abort_price_str: Option<String>,
 }
 
 impl EntryConfig {
@@ -399,6 +401,7 @@ struct OrderManager {
     last_filters_attempt_at: Option<Instant>,
     entry_round_logged: bool,
     entry_startup_cleanup_done: bool,
+    entry_abort_checked: bool,
 }
 
 type SharedManager = Arc<AsyncMutex<OrderManager>>;
@@ -437,19 +440,24 @@ async fn main() {
     log_price_gap_warning(&logger, config.trigger_price, config.order_price);
     if let Some(entry) = &config.entry {
         let entry_usdc = entry.entry_usdc_str.as_deref().unwrap_or("unset");
+        let entry_abort = config
+            .entry_abort_price_str
+            .as_deref()
+            .unwrap_or("unset");
         let entry_qty = entry
             .entry_qty()
             .map(|(_, qty)| qty)
             .unwrap_or_else(|| "unset".to_string());
         logger.event(&format!(
-            "event=entry_config entry={} stop={} side={} entry_usdc={} leverage={} entry_qty={} entry_detect={}",
+            "event=entry_config entry={} stop={} side={} entry_usdc={} leverage={} entry_qty={} entry_detect={} entry_abort={}",
             entry.entry_price_str,
             entry.stop_price_str,
             entry.side.as_str(),
             entry_usdc,
             entry.leverage,
             entry_qty,
-            config.entry_detect.as_str()
+            config.entry_detect.as_str(),
+            entry_abort
         ));
     }
 
@@ -559,6 +567,7 @@ impl OrderManager {
             last_filters_attempt_at: None,
             entry_round_logged: false,
             entry_startup_cleanup_done: false,
+            entry_abort_checked: false,
         }
     }
 
@@ -633,7 +642,7 @@ impl OrderManager {
         }
 
         if self.config.entry.is_some() && self.should_manage_entry() {
-            if let Err(err) = self.manage_entry_orders(symbol).await {
+            if let Err(err) = self.manage_entry_orders(symbol, price).await {
                 self.logger
                     .error(&format!("event=entry_manage_error err={err}"));
             }
@@ -967,6 +976,7 @@ impl OrderManager {
     async fn manage_entry_orders(
         &mut self,
         symbol: &str,
+        price: f64,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let entry_detect = self.config.entry_detect;
         let entry = match self.config.entry.clone() {
@@ -987,6 +997,8 @@ impl OrderManager {
             })
             .cloned()
             .collect();
+        let entry_orders_start_count = entry_orders.len();
+        let had_entry_orders_at_start = entry_orders_start_count > 0;
         let mut stop_orders: Vec<ConditionalOrder> = conditional_orders
             .into_iter()
             .filter(|o| o.client_strategy_id.starts_with(STOP_CLIENT_ID_PREFIX))
@@ -1032,6 +1044,17 @@ impl OrderManager {
         self.stop_client_id = stop_orders.first().map(|o| o.client_strategy_id.clone());
 
         let has_entry_orders = !entry_orders.is_empty();
+        if !self.entry_abort_checked {
+            self.entry_abort_checked = true;
+            if self.config.entry_abort_price.is_some() && had_entry_orders_at_start {
+                self.event_with_price(&format!(
+                    "event=entry_abort_disabled symbol={symbol} reason=existing_entry_orders count={}",
+                    entry_orders_start_count
+                ));
+                self.config.entry_abort_price = None;
+                self.config.entry_abort_price_str = None;
+            }
+        }
         let position = self.last_position.clone().unwrap_or(PositionSnapshot {
             amt: 0.0,
             amt_str: "0".to_string(),
@@ -1089,6 +1112,35 @@ impl OrderManager {
             .and_then(|qty| qty.parse::<f64>().ok());
         if entry_qty.is_some() || has_entry_orders {
             self.entry_missing_logged = false;
+        }
+
+        let entry_ready = has_entry_orders || entry_qty.is_some();
+        if let Some(entry_abort) = self.config.entry_abort_price {
+            if entry_ready
+                && !self.entry_completed
+                && !has_position
+                && entry_abort_touched(entry.entry_price, entry_abort, price)
+            {
+                let abort_str = self
+                    .config
+                    .entry_abort_price_str
+                    .as_deref()
+                    .unwrap_or("unset");
+                self.event_with_price(&format!(
+                    "event=entry_abort_touched symbol={symbol} abort={abort_str}"
+                ));
+                let extra_entry_orders: Vec<OpenOrder> = entry_orders
+                    .iter()
+                    .filter(|order| !order.client_order_id.starts_with(ENTRY_CLIENT_ID_PREFIX))
+                    .cloned()
+                    .collect();
+                if !extra_entry_orders.is_empty() {
+                    self.cancel_orders(symbol, &extra_entry_orders).await?;
+                }
+                self.exit_with_reason(symbol, "entry_abort_touched", "tick")
+                    .await?;
+                return Ok(());
+            }
         }
 
         if self.entry_completed {
@@ -2118,6 +2170,17 @@ fn approx_eq(a: f64, b: f64) -> bool {
     diff <= 1e-8 * scale
 }
 
+fn entry_abort_touched(entry_price: f64, abort_price: f64, price: f64) -> bool {
+    if approx_eq(price, abort_price) {
+        return true;
+    }
+    if abort_price >= entry_price {
+        price > abort_price
+    } else {
+        price < abort_price
+    }
+}
+
 fn now_millis() -> u64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2259,6 +2322,7 @@ fn parse_args() -> Result<Config, String> {
     let mut entry_usdc: Option<String> = None;
     let mut entry_leverage: Option<String> = None;
     let mut entry_detect: Option<String> = None;
+    let mut entry_abort: Option<String> = None;
     let mut log_enabled = true;
 
     let mut args = env::args().skip(1);
@@ -2272,6 +2336,7 @@ fn parse_args() -> Result<Config, String> {
             "--entry-usdc" => entry_usdc = args.next(),
             "--leverage" => entry_leverage = args.next(),
             "--entry-detect" => entry_detect = args.next(),
+            "--entry-abort" => entry_abort = args.next(),
             "--no-log" => log_enabled = false,
             "--help" | "-h" => return Err(usage()),
             _ => return Err(usage()),
@@ -2353,6 +2418,22 @@ fn parse_args() -> Result<Config, String> {
         }
     };
 
+    let entry_abort_parsed = match entry_abort {
+        Some(value) => {
+            if entry.is_none() {
+                return Err(
+                    "--entry-abort requires --entry --stop --side\n".to_string() + &usage(),
+                );
+            }
+            let price = value.parse::<f64>().map_err(|_| usage())?;
+            if price <= 0.0 {
+                return Err("entry abort price must be > 0\n".to_string() + &usage());
+            }
+            Some((price, value))
+        }
+        None => None,
+    };
+
     Ok(Config {
         trigger_price: trigger,
         order_price: order,
@@ -2361,13 +2442,15 @@ fn parse_args() -> Result<Config, String> {
         log_enabled,
         entry,
         entry_detect,
+        entry_abort_price: entry_abort_parsed.as_ref().map(|(price, _)| *price),
+        entry_abort_price_str: entry_abort_parsed.map(|(_, value)| value),
     })
 }
 
 fn usage() -> String {
     [
         "usage:",
-        "  rb --trigger <price> --order <price> [--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>]] [--no-log]",
+        "  rb --trigger <price> --order <price> [--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]] [--no-log]",
         "env:",
         "  BINANCE_API_KEY=... BINANCE_API_SECRET=... [BINANCE_BASE_URL=https://papi.binance.com] [RB_LOG_PATH=rb.log] [RB_ENTRY_USDC=<amount>] [RB_ENTRY_LEVERAGE=100] [RB_ENTRY_DETECT=prefix|any]",
         "example:",

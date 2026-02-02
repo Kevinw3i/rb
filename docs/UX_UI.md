@@ -6,10 +6,12 @@
 - Position text: `LONG <qty>`, `SHORT <qty>`, or `FLAT`.
 
 ## Entry Options
-- Optional entry/stop inputs: `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>]`.
+- Optional entry/stop inputs: `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]`.
 - Entry order size is derived from USDC amount and leverage (default 100), then floored to the LOT_SIZE step from exchange info.
 - When both entry USDC and leverage are provided, startup cancels same-price entry/stop orders before re-placing them with the computed rounded quantity.
 - Entry is single-use: once a position is opened, no new entry orders are placed.
+- If `--entry-abort` is set and the market price reaches that level before entry fills, the bot cancels open entry and stop-loss orders and exits.
+- If an entry order already exists at startup (per entry detection), `--entry-abort` is ignored for this run.
 - Entry detection default is `prefix`; use `any` to detect web-placed LIMIT orders matching entry price/side.
 - Stop-loss orders are tracked as UM conditional orders (strategyId/newClientStrategyId).
 
