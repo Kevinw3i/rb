@@ -1,3 +1,6 @@
+mod alerting;
+mod telegram;
+
 use std::env;
 use std::error::Error;
 use std::fs::OpenOptions;
@@ -17,7 +20,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::Sha256;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::{interval, sleep};
+use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const FUTURES_WS_BASE_URL: &str = "wss://fstream.binance.com/ws";
@@ -225,6 +228,8 @@ struct LoggerInner {
     path: PathBuf,
     file: Option<StdMutex<std::fs::File>>,
     enabled: bool,
+    alert_sender: StdMutex<Option<alerting::AlertSender>>,
+    alert_context: StdMutex<alerting::AlertContext>,
 }
 
 enum LogLevel {
@@ -257,12 +262,49 @@ impl Logger {
                 path,
                 file,
                 enabled,
+                alert_sender: StdMutex::new(None),
+                alert_context: StdMutex::new(alerting::AlertContext::default()),
             }),
         })
     }
 
     fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    fn set_context(&self, market: &str, symbol: &str) {
+        let mut guard = self
+            .inner
+            .alert_context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *guard = alerting::AlertContext::for_symbol_market(market, symbol);
+    }
+
+    fn context(&self) -> alerting::AlertContext {
+        self.inner
+            .alert_context
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    fn set_alert_sender(&self, sender: alerting::AlertSender) {
+        let mut guard = self
+            .inner
+            .alert_sender
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *guard = Some(sender);
+    }
+
+    fn shutdown_alerting(&self) {
+        let mut guard = self
+            .inner
+            .alert_sender
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *guard = None;
     }
 
     fn event(&self, message: &str) {
@@ -275,6 +317,19 @@ impl Logger {
 
     fn error(&self, message: &str) {
         self.log(LogLevel::Error, message, true);
+        self.send_alert(alerting::Alert::error(message, self.context()));
+    }
+
+    fn send_alert(&self, alert: alerting::Alert) {
+        let sender = self
+            .inner
+            .alert_sender
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(sender) = sender {
+            sender.try_send(alert);
+        }
     }
 
     fn log(&self, level: LogLevel, message: &str, print_stderr: bool) {
@@ -507,6 +562,37 @@ async fn main() {
             return;
         }
     };
+    logger.set_context(config.market.as_str(), &config.symbol);
+
+    let mut tg_handle: Option<tokio::task::JoinHandle<()>> = None;
+    match telegram::TelegramConfig::from_env() {
+        Ok(Some(cfg)) => {
+            let thread_display = cfg
+                .thread_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unset".to_string());
+            let enabled_line = format!(
+                "event=tg_alerting enabled=true chat_id={} thread_id={} api_base_url={} queue_size={} timeout_secs={} rate_limit_per_sec={}",
+                cfg.chat_id,
+                thread_display,
+                cfg.api_base_url,
+                cfg.queue_size,
+                cfg.timeout.as_secs(),
+                cfg.rate_limit_per_sec
+            );
+            let telegram::TelegramWorker { sender, handle } = telegram::spawn_telegram_worker(cfg);
+            logger.set_alert_sender(sender);
+            tg_handle = Some(handle);
+            logger.event(&enabled_line);
+        }
+        Ok(None) => {
+            logger.event("event=tg_alerting enabled=false reason=missing_env");
+        }
+        Err(err) => {
+            logger.error(&format!("event=tg_alerting_config_error err={err}"));
+        }
+    }
+
     let log_path_display = if config.log_enabled {
         logger.path().display().to_string()
     } else {
@@ -658,6 +744,19 @@ async fn main() {
 
     if let Err(err) = user_stream_handle.await {
         logger.error(&format!("event=user_stream_task_error err={err}"));
+    }
+
+    logger.shutdown_alerting();
+    if let Some(handle) = tg_handle {
+        match timeout(Duration::from_secs(1), handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                logger.event(&format!("event=tg_worker_join_error err={err}"));
+            }
+            Err(_) => {
+                logger.event("event=tg_worker_join_timeout seconds=1");
+            }
+        }
     }
 }
 
@@ -890,8 +989,14 @@ impl OrderManager {
         let (orders, conditional) = self.cancel_managed_orders(symbol).await?;
         self.exit_requested = true;
         self.exit_reason = Some(format!("{reason}_{source}"));
-        self.logger.event(&format!(
+        let message = format!(
             "event=exit reason={reason} source={source} canceled_orders={orders} canceled_conditional={conditional}"
+        );
+        self.logger.event(&message);
+        self.logger.send_alert(alerting::Alert::exit(
+            message,
+            alerting::AlertContext::for_symbol_market(self.config.market.as_str(), symbol),
+            self.last_price_str.clone(),
         ));
         Ok(())
     }

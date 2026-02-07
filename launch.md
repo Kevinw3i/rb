@@ -15,6 +15,7 @@ cargo run -- --symbol BTC/USDC --market futures --trigger 95450 --order 93658.7
   - entry 未成交前若價格先觸碰到 entry-abort，會取消未成交 entry 與止損單並結束任務
   - 若啟動時已存在 entry 單（依偵測模式），entry-abort 本次不生效
 - 關閉 log 檔寫入：--no-log（EVENT 仍會輸出到 stderr）
+- TG 告警（非同步、不影響下單）：設定 TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID（可選 TELEGRAM_MESSAGE_THREAD_ID）
 
 範例（只跑 trigger/order）：
 rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500
@@ -36,3 +37,7 @@ rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 \
 
 範例（關閉 log 檔寫入）：
 rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 --no-log
+
+範例（啟用 TG 告警）：
+TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \
+rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500

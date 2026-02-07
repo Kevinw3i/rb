@@ -56,3 +56,10 @@
 ## Order Detection
 - Entry detection mode `prefix` (default) only treats `rb-entry-` orders as entry orders.
 - Entry detection mode `any` treats matching LIMIT orders (price/side) as entry orders.
+
+## Telegram (optional)
+- Base: `TG_API_BASE_URL` (default `https://api.telegram.org`).
+- SendMessage: `POST /bot<TELEGRAM_BOT_TOKEN>/sendMessage`.
+  - JSON: `chat_id` (from `TELEGRAM_CHAT_ID`), `text`, optional `message_thread_id` (from `TELEGRAM_MESSAGE_THREAD_ID`).
+- Enabled only when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set.
+- Best-effort: failures/timeouts do not affect order processing.

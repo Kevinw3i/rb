@@ -10,11 +10,13 @@
 ## Inputs
 - CLI: required `--symbol <pair>` and `--market <futures|spot>`, required `--trigger <price>`, `--order <price>`, optional `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]`, optional `--no-log` to disable log file writes.
 - Environment: `BINANCE_API_KEY`, `BINANCE_API_SECRET`, optional `BINANCE_BASE_URL`/`BINANCE_EXCHANGE_BASE_URL` (defaults depend on market), optional `RB_LOG_PATH` (default `rb.log`), optional `RB_ENTRY_USDC` (entry notional), optional `RB_ENTRY_LEVERAGE` (default 100), optional `RB_ENTRY_DETECT` (`prefix` or `any`).
+- Telegram alerts (optional): set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to enable best-effort async alerts for `ERROR` and `event=exit`. Optional: `TELEGRAM_MESSAGE_THREAD_ID`, `TG_API_BASE_URL`, `TG_ALERT_QUEUE_SIZE`, `TG_ALERT_TIMEOUT_SECS`, `TG_ALERT_RATE_LIMIT_PER_SEC`.
 - `--entry/--stop/--side` must be provided together; entry order placement requires an entry USDC amount (futures only).
 
 ## Behavior
 - On startup, validate the requested symbol exists for the selected market. If invalid, warn and exit without running.
 - If the trigger/order gap is 10% or more, print a warning and continue.
+- Telegram alerts are fully asynchronous: the trading loop never `await`s Telegram I/O. Alerts are enqueued with a bounded `try_send` queue and are dropped if the queue is full; Telegram failures never affect order management.
 - If order price < trigger price:
   - When latest price < trigger, if a position exists, ensure a reduce-only maker order
     at the order price for 100% size on the opposite side.

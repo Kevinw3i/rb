@@ -93,3 +93,16 @@
    - Place an entry LIMIT order that matches detection mode before starting the bot.
    - Run with `--entry-abort`.
    - Expect `entry_abort` to be ignored (no abort on price touch).
+
+30. Telegram alerting disabled by default
+   - Ensure `TELEGRAM_BOT_TOKEN` and/or `TELEGRAM_CHAT_ID` are unset.
+   - Expect `event=tg_alerting enabled=false reason=missing_env` in stderr.
+
+31. Telegram alert on ERROR
+   - Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (and optionally `TELEGRAM_MESSAGE_THREAD_ID`).
+   - Trigger an error (e.g. unset `BINANCE_API_KEY`).
+   - Expect a Telegram message with `kind=ERROR` and the original error line.
+
+32. Telegram failures do not affect order processing
+   - Set `TELEGRAM_BOT_TOKEN` to an invalid value (or block Telegram access) while keeping Binance keys valid.
+   - Expect stderr to show Telegram send errors while the bot continues to place/cancel orders normally.

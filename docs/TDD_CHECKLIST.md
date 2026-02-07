@@ -10,6 +10,9 @@
 - [ ] Event logs are printed for connect/reconnect, order placement, and cancellation.
 - [ ] Log file appends EVENT lines at `RB_LOG_PATH` (default `rb.log`) unless `--no-log` is set.
 - [ ] Order/position EVENT logs include `current_price=<last_price>` when available.
+- [ ] Telegram alerting is enabled only when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set.
+- [ ] Telegram alerts are sent via a bounded, non-blocking queue (`try_send`) and do not affect order management on failure.
+- [ ] Telegram message formatting truncates to <= 4096 chars.
 - [ ] Warn on startup when trigger/order gap is >= 10%.
 - [ ] REST requests use market-specific base URLs (PAPI UM for futures, spot API for spot).
 - [ ] Spot mode uses spot REST endpoints and `LIMIT_MAKER` take-profit orders.
