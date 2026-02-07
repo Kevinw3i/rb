@@ -61,5 +61,6 @@
 - Base: `TG_API_BASE_URL` (default `https://api.telegram.org`).
 - SendMessage: `POST /bot<TELEGRAM_BOT_TOKEN>/sendMessage`.
   - JSON: `chat_id` (from `TELEGRAM_CHAT_ID`), `text`, optional `message_thread_id` (from `TELEGRAM_MESSAGE_THREAD_ID`).
+- Requests set `parse_mode=HTML` and render a bold title line (best-effort).
 - Enabled only when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set.
 - Best-effort: failures/timeouts do not affect order processing.

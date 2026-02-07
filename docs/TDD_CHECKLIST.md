@@ -12,7 +12,9 @@
 - [ ] Order/position EVENT logs include `current_price=<last_price>` when available.
 - [ ] Telegram alerting is enabled only when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set.
 - [ ] Telegram alerts are sent via a bounded, non-blocking queue (`try_send`) and do not affect order management on failure.
+- [ ] Telegram sendMessage requests use `parse_mode=HTML` and HTML escaping so dynamic values can't break formatting.
 - [ ] Telegram message formatting truncates to <= 4096 chars.
+- [ ] Telegram fill alerts are emitted for `ENTRY FILLED`, and exit alerts are emitted for `TAKE PROFIT FILLED` / `STOP FILLED` / `ENTRY ABORT TRIGGERED` as applicable.
 - [ ] Warn on startup when trigger/order gap is >= 10%.
 - [ ] REST requests use market-specific base URLs (PAPI UM for futures, spot API for spot).
 - [ ] Spot mode uses spot REST endpoints and `LIMIT_MAKER` take-profit orders.

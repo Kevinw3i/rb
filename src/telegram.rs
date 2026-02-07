@@ -122,6 +122,7 @@ pub fn spawn_telegram_worker(cfg: TelegramConfig) -> TelegramWorker {
             let body = SendMessageRequest {
                 chat_id: &cfg.chat_id,
                 text: &text,
+                parse_mode: Some("HTML"),
                 message_thread_id: cfg.thread_id,
             };
 
@@ -177,6 +178,8 @@ struct SendMessageRequest<'a> {
     chat_id: &'a str,
     text: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     message_thread_id: Option<i64>,
 }
 
@@ -191,16 +194,41 @@ fn format_alert_text(alert: &Alert) -> String {
         header.push_str(symbol);
     }
 
-    let mut lines = Vec::with_capacity(6);
-    lines.push(header);
-    lines.push(format!("kind={}", alert.kind.as_str()));
-    lines.push(format!("ts={}", alert.ts.to_rfc3339()));
-    if let Some(price) = &alert.current_price {
-        lines.push(format!("current_price={price}"));
+    let mut lines = Vec::with_capacity(8);
+    lines.push(html_escape(&header));
+    lines.push("".to_string());
+    lines.push(format!("<b>{}</b>", html_escape(&alert.title)));
+    lines.push(format!("category={}", html_escape(alert.kind.as_str())));
+    for (key, value) in &alert.fields {
+        lines.push(format!(
+            "{}={}",
+            html_escape(key),
+            html_escape(value)
+        ));
     }
-    lines.push(alert.message.clone());
+    if let Some(price) = &alert.current_price {
+        lines.push(format!("current_price={}", html_escape(price)));
+    }
+    lines.push(format!("ts={}", html_escape(&alert.ts.to_rfc3339())));
+    if let Some(body) = &alert.body {
+        lines.push("".to_string());
+        lines.push(html_escape(body));
+    }
 
     truncate_for_telegram(&lines.join("\n"))
+}
+
+fn html_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn truncate_for_telegram(text: &str) -> String {
@@ -228,7 +256,7 @@ fn truncate_for_log(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::alerting::AlertContext;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -244,6 +272,8 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/botTEST_TOKEN/sendMessage"))
+            .and(body_string_contains("\"parse_mode\":\"HTML\""))
+            .and(body_string_contains("<b>ERROR</b>"))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)

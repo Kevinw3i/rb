@@ -516,11 +516,20 @@ struct ConditionalOrderHistory {
     status: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct FillInfo {
+    side: Option<String>,
+    qty: Option<String>,
+    price: Option<String>,
+    client_id: Option<String>,
+}
+
 struct OrderManager {
     client: BinanceClient,
     config: Config,
     logger: Logger,
     last_position: Option<PositionSnapshot>,
+    last_open_position: Option<PositionSnapshot>,
     last_position_at: Option<Instant>,
     last_manage_at: Option<Instant>,
     last_active: Option<bool>,
@@ -531,6 +540,8 @@ struct OrderManager {
     open_orders_cached_at: Option<Instant>,
     tp_client_id: Option<String>,
     stop_client_id: Option<String>,
+    entry_client_id: Option<String>,
+    last_fill: Option<FillInfo>,
     exit_requested: bool,
     exit_reason: Option<String>,
     position_was_open: bool,
@@ -767,6 +778,7 @@ impl OrderManager {
             config,
             logger,
             last_position: None,
+            last_open_position: None,
             last_position_at: None,
             last_manage_at: None,
             last_active: None,
@@ -777,6 +789,8 @@ impl OrderManager {
             open_orders_cached_at: None,
             tp_client_id: None,
             stop_client_id: None,
+            entry_client_id: None,
+            last_fill: None,
             exit_requested: false,
             exit_reason: None,
             position_was_open: false,
@@ -819,6 +833,7 @@ impl OrderManager {
         if let Some(position) = &self.last_position {
             if position.amt.abs() > f64::EPSILON {
                 self.position_was_open = true;
+                self.last_open_position = Some(position.clone());
             }
         }
 
@@ -989,15 +1004,101 @@ impl OrderManager {
         let (orders, conditional) = self.cancel_managed_orders(symbol).await?;
         self.exit_requested = true;
         self.exit_reason = Some(format!("{reason}_{source}"));
-        let message = format!(
+        let log_line = format!(
             "event=exit reason={reason} source={source} canceled_orders={orders} canceled_conditional={conditional}"
         );
-        self.logger.event(&message);
-        self.logger.send_alert(alerting::Alert::exit(
-            message,
+        self.logger.event(&log_line);
+
+        let title = match reason {
+            "tp_filled" | "order_filled" => "TAKE PROFIT FILLED",
+            "stop_filled" => "STOP FILLED",
+            "entry_abort_touched" => "ENTRY ABORT TRIGGERED",
+            _ => "EXIT",
+        };
+        let mut alert = alerting::Alert::exit(
+            title,
             alerting::AlertContext::for_symbol_market(self.config.market.as_str(), symbol),
-            self.last_price_str.clone(),
-        ));
+        )
+        .with_current_price(self.last_price_str.clone())
+        .with_field("kind", reason)
+        .with_field("source", source)
+        .with_field("canceled_orders", orders.to_string())
+        .with_field("canceled_conditional", conditional.to_string());
+
+        if reason == "entry_abort_touched" {
+            if let Some(entry) = &self.config.entry {
+                alert = alert
+                    .with_field("entry_price", entry.entry_price_str.clone())
+                    .with_field("stop_price", entry.stop_price_str.clone());
+            }
+            let abort = self
+                .config
+                .entry_abort_price_str
+                .as_deref()
+                .unwrap_or("unset");
+            alert = alert.with_field("abort_price", abort);
+        } else if reason == "tp_filled" || reason == "order_filled" || reason == "stop_filled" {
+            let fill = self.last_fill.take();
+            let mut side: Option<String> = None;
+            let mut qty: Option<String> = None;
+            let mut price: Option<String> = None;
+            let mut client_id: Option<String> = None;
+
+            if let Some(fill) = fill {
+                side = fill.side;
+                qty = fill.qty;
+                price = fill.price;
+                client_id = fill.client_id;
+            }
+
+            if side.is_none() {
+                if let Some(pos) = &self.last_open_position {
+                    if pos.amt.abs() > f64::EPSILON {
+                        let close_side = if pos.amt > 0.0 { "SELL" } else { "BUY" };
+                        side = Some(close_side.to_string());
+                    }
+                }
+            }
+            if qty.is_none() {
+                if let Some(pos) = &self.last_open_position {
+                    if pos.amt.abs() > f64::EPSILON {
+                        qty = Some(abs_str(&pos.amt_str));
+                    }
+                }
+            }
+
+            if price.is_none() {
+                if reason == "stop_filled" {
+                    if let Some(entry) = &self.config.entry {
+                        price = Some(entry.stop_price_str.clone());
+                    }
+                } else {
+                    price = Some(self.config.order_price_str.clone());
+                }
+            }
+            if client_id.is_none() {
+                if reason == "stop_filled" {
+                    client_id = self.stop_client_id.clone();
+                } else {
+                    client_id = self.tp_client_id.clone();
+                }
+            }
+
+            if let Some(value) = side {
+                alert = alert.with_field("side", value);
+            }
+            if let Some(value) = qty {
+                alert = alert.with_field("qty", value);
+            }
+            if let Some(value) = price {
+                alert = alert.with_field("price", value);
+            }
+            if let Some(value) = client_id {
+                alert = alert.with_field("client_id", value);
+            }
+        }
+
+        self.logger.send_alert(alert);
         Ok(())
     }
 
@@ -1257,6 +1358,9 @@ impl OrderManager {
             .collect();
         let entry_orders_start_count = entry_orders.len();
         let had_entry_orders_at_start = entry_orders_start_count > 0;
+        if let Some(order) = entry_orders.first() {
+            self.entry_client_id = Some(order.client_order_id.clone());
+        }
         let mut stop_orders: Vec<ConditionalOrder> = conditional_orders
             .into_iter()
             .filter(|o| o.client_strategy_id.starts_with(STOP_CLIENT_ID_PREFIX))
@@ -1324,6 +1428,25 @@ impl OrderManager {
         if has_position && !self.entry_completed {
             self.entry_completed = true;
             self.event_with_price(&format!("event=entry_completed symbol={symbol}"));
+
+            let mut alert = alerting::Alert::fill(
+                "ENTRY FILLED",
+                alerting::AlertContext::for_symbol_market(self.config.market.as_str(), symbol),
+            )
+            .with_field("kind", "entry_filled");
+            let side = if position.amt > 0.0 { "LONG" } else { "SHORT" };
+            alert = alert.with_field("side", side);
+            alert = alert.with_field("qty", position_qty_str.clone());
+            if let Some(price_str) = &self.last_price_str {
+                alert = alert.with_field("price", price_str.clone());
+            }
+            if let Some(client_id) = &self.entry_client_id {
+                alert = alert.with_field("client_id", client_id.clone());
+            }
+            alert = alert
+                .with_field("entry_price", entry.entry_price_str.clone())
+                .with_field("stop_price", entry.stop_price_str.clone());
+            self.logger.send_alert(alert);
         }
         let mut entry_qty = entry.entry_qty();
         let mut entry_qty_reason: Option<&str> = None;
@@ -1449,6 +1572,7 @@ impl OrderManager {
                     entry.entry_price_str,
                     entry_qty_str
                 ));
+                self.entry_client_id = Some(order.client_order_id.clone());
                 self.clear_open_orders_cache();
             }
         } else if entry_orders.is_empty() {
@@ -2255,9 +2379,10 @@ async fn stream_user_data(
                                     return Ok(());
                                 }
                             }
-                            if let Some((event_symbol, reason)) = parse_user_stream_exit(&value, market) {
+                            if let Some((event_symbol, reason, fill)) = parse_user_stream_exit(&value, market) {
                                 if event_symbol == symbol {
                                     let mut guard = manager.lock().await;
+                                    guard.last_fill = Some(fill);
                                     if let Err(err) = guard.exit_with_reason(&event_symbol, &reason, "ws").await {
                                         logger.error(&format!("event=exit_ws_error err={err}"));
                                     }
@@ -2514,7 +2639,7 @@ fn is_conditional_ws_filled_status(status: &str) -> bool {
     matches!(status, "TRIGGERED" | "FILLED")
 }
 
-fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, String)> {
+fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, String, FillInfo)> {
     let event_type = value.get("e")?.as_str()?;
     match market {
         MarketType::Futures => match event_type {
@@ -2529,7 +2654,24 @@ fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, 
                     return None;
                 }
                 let symbol = order.get("s")?.as_str()?.to_string();
-                Some((symbol, "tp_filled".to_string()))
+                let side = order.get("S").and_then(|value| value.as_str()).map(|v| v.to_string());
+                let qty = order
+                    .get("z")
+                    .or_else(|| order.get("q"))
+                    .and_then(|value| value.as_str())
+                    .map(|v| v.to_string());
+                let price = order
+                    .get("ap")
+                    .or_else(|| order.get("L"))
+                    .and_then(|value| value.as_str())
+                    .map(|v| v.to_string());
+                let fill = FillInfo {
+                    side,
+                    qty,
+                    price,
+                    client_id: Some(client_id.to_string()),
+                };
+                Some((symbol, "tp_filled".to_string(), fill))
             }
             "CONDITIONAL_ORDER_TRADE_UPDATE" => {
                 let order = value.get("so")?;
@@ -2542,7 +2684,22 @@ fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, 
                     return None;
                 }
                 let symbol = order.get("s")?.as_str()?.to_string();
-                Some((symbol, "stop_filled".to_string()))
+                let side = order.get("S").and_then(|value| value.as_str()).map(|v| v.to_string());
+                let qty = order
+                    .get("q")
+                    .and_then(|value| value.as_str())
+                    .map(|v| v.to_string());
+                let price = order
+                    .get("ap")
+                    .and_then(|value| value.as_str())
+                    .map(|v| v.to_string());
+                let fill = FillInfo {
+                    side,
+                    qty,
+                    price,
+                    client_id: Some(client_id.to_string()),
+                };
+                Some((symbol, "stop_filled".to_string(), fill))
             }
             _ => None,
         },
@@ -2559,8 +2716,110 @@ fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, 
                 return None;
             }
             let symbol = value.get("s")?.as_str()?.to_string();
-            Some((symbol, "order_filled".to_string()))
+            let side = value.get("S").and_then(|value| value.as_str()).map(|v| v.to_string());
+            let qty = value
+                .get("z")
+                .and_then(|value| value.as_str())
+                .map(|v| v.to_string());
+            let price = value
+                .get("L")
+                .and_then(|value| value.as_str())
+                .map(|v| v.to_string());
+            let fill = FillInfo {
+                side,
+                qty,
+                price,
+                client_id: Some(client_id.to_string()),
+            };
+            Some((symbol, "order_filled".to_string(), fill))
         }
+    }
+}
+
+#[cfg(test)]
+mod user_stream_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_user_stream_exit_futures_tp_filled_extracts_fields() {
+        let value = json!({
+            "e": "ORDER_TRADE_UPDATE",
+            "o": {
+                "c": "rb-tp-123",
+                "X": "FILLED",
+                "s": "BTCUSDC",
+                "S": "SELL",
+                "z": "0.1",
+                "ap": "70000"
+            }
+        });
+        let (symbol, reason, fill) =
+            parse_user_stream_exit(&value, MarketType::Futures).expect("should parse");
+        assert_eq!(symbol, "BTCUSDC");
+        assert_eq!(reason, "tp_filled");
+        assert_eq!(fill.side.as_deref(), Some("SELL"));
+        assert_eq!(fill.qty.as_deref(), Some("0.1"));
+        assert_eq!(fill.price.as_deref(), Some("70000"));
+        assert_eq!(fill.client_id.as_deref(), Some("rb-tp-123"));
+    }
+
+    #[test]
+    fn parse_user_stream_exit_futures_stop_filled_extracts_fields() {
+        let value = json!({
+            "e": "CONDITIONAL_ORDER_TRADE_UPDATE",
+            "so": {
+                "c": "rb-stop-999",
+                "os": "TRIGGERED",
+                "s": "BTCUSDC",
+                "S": "SELL",
+                "q": "0.2",
+                "ap": "69950"
+            }
+        });
+        let (symbol, reason, fill) =
+            parse_user_stream_exit(&value, MarketType::Futures).expect("should parse");
+        assert_eq!(symbol, "BTCUSDC");
+        assert_eq!(reason, "stop_filled");
+        assert_eq!(fill.side.as_deref(), Some("SELL"));
+        assert_eq!(fill.qty.as_deref(), Some("0.2"));
+        assert_eq!(fill.price.as_deref(), Some("69950"));
+        assert_eq!(fill.client_id.as_deref(), Some("rb-stop-999"));
+    }
+
+    #[test]
+    fn parse_user_stream_exit_spot_order_filled_extracts_fields() {
+        let value = json!({
+            "e": "executionReport",
+            "c": "rb-tp-1",
+            "X": "FILLED",
+            "s": "BTCUSDC",
+            "S": "SELL",
+            "z": "0.05",
+            "L": "70010"
+        });
+        let (symbol, reason, fill) =
+            parse_user_stream_exit(&value, MarketType::Spot).expect("should parse");
+        assert_eq!(symbol, "BTCUSDC");
+        assert_eq!(reason, "order_filled");
+        assert_eq!(fill.side.as_deref(), Some("SELL"));
+        assert_eq!(fill.qty.as_deref(), Some("0.05"));
+        assert_eq!(fill.price.as_deref(), Some("70010"));
+        assert_eq!(fill.client_id.as_deref(), Some("rb-tp-1"));
+    }
+
+    #[test]
+    fn parse_user_stream_exit_ignores_non_bot_orders() {
+        let value = json!({
+            "e": "executionReport",
+            "c": "not-ours",
+            "X": "FILLED",
+            "s": "BTCUSDC",
+            "S": "SELL",
+            "z": "0.05",
+            "L": "70010"
+        });
+        assert!(parse_user_stream_exit(&value, MarketType::Spot).is_none());
     }
 }
 

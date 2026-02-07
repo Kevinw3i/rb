@@ -106,3 +106,23 @@
 32. Telegram failures do not affect order processing
    - Set `TELEGRAM_BOT_TOKEN` to an invalid value (or block Telegram access) while keeping Binance keys valid.
    - Expect stderr to show Telegram send errors while the bot continues to place/cancel orders normally.
+
+33. Telegram alert on ENTRY FILLED
+   - Enable Telegram alerts (`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`).
+   - Run futures entry flow so a position opens (entry fills).
+   - Expect a Telegram message titled `ENTRY FILLED` including `kind=entry_filled`, `side=LONG|SHORT`, `qty=...`, and (best-effort) `client_id=...`.
+
+34. Telegram alert on TAKE PROFIT FILLED
+   - Enable Telegram alerts.
+   - Let the take-profit order fill and the bot exit.
+   - Expect a Telegram message titled `TAKE PROFIT FILLED` including `kind=tp_filled` (or `kind=order_filled` in spot), plus (best-effort) `side/qty/price/client_id`.
+
+35. Telegram alert on STOP FILLED
+   - Enable Telegram alerts.
+   - Let the stop-loss order fill and the bot exit.
+   - Expect a Telegram message titled `STOP FILLED` including `kind=stop_filled`, plus (best-effort) `side/qty/price/client_id`.
+
+36. Telegram alert on ENTRY ABORT TRIGGERED
+   - Enable Telegram alerts.
+   - Configure `--entry-abort` and let price touch the abort threshold before entry fills.
+   - Expect a Telegram message titled `ENTRY ABORT TRIGGERED` including `kind=entry_abort_touched` and `abort_price=...`.

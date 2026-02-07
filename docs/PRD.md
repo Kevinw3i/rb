@@ -17,6 +17,7 @@
 - On startup, validate the requested symbol exists for the selected market. If invalid, warn and exit without running.
 - If the trigger/order gap is 10% or more, print a warning and continue.
 - Telegram alerts are fully asynchronous: the trading loop never `await`s Telegram I/O. Alerts are enqueued with a bounded `try_send` queue and are dropped if the queue is full; Telegram failures never affect order management.
+  - Alerts are sent for: `ERROR` logs, `ENTRY FILLED` (first time a position opens), `TAKE PROFIT FILLED` / `STOP FILLED` (when the bot exits after a fill), and `ENTRY ABORT TRIGGERED`.
 - If order price < trigger price:
   - When latest price < trigger, if a position exists, ensure a reduce-only maker order
     at the order price for 100% size on the opposite side.

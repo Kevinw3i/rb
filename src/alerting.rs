@@ -23,6 +23,7 @@ impl AlertContext {
 #[derive(Clone, Copy, Debug)]
 pub enum AlertKind {
     Error,
+    Fill,
     Exit,
 }
 
@@ -30,6 +31,7 @@ impl AlertKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             AlertKind::Error => "ERROR",
+            AlertKind::Fill => "FILL",
             AlertKind::Exit => "EXIT",
         }
     }
@@ -38,35 +40,52 @@ impl AlertKind {
 #[derive(Clone, Debug)]
 pub struct Alert {
     pub kind: AlertKind,
-    pub message: String,
+    pub title: String,
+    pub fields: Vec<(String, String)>,
+    pub body: Option<String>,
     pub ts: DateTime<Utc>,
     pub context: AlertContext,
     pub current_price: Option<String>,
 }
 
 impl Alert {
-    pub fn error(message: impl Into<String>, context: AlertContext) -> Self {
+    pub fn new(kind: AlertKind, title: impl Into<String>, context: AlertContext) -> Self {
         Self {
-            kind: AlertKind::Error,
-            message: message.into(),
+            kind,
+            title: title.into(),
+            fields: Vec::new(),
+            body: None,
             ts: Utc::now(),
             context,
             current_price: None,
         }
     }
 
-    pub fn exit(
-        message: impl Into<String>,
-        context: AlertContext,
-        current_price: Option<String>,
-    ) -> Self {
-        Self {
-            kind: AlertKind::Exit,
-            message: message.into(),
-            ts: Utc::now(),
-            context,
-            current_price,
-        }
+    pub fn error(message: impl Into<String>, context: AlertContext) -> Self {
+        Self::new(AlertKind::Error, "ERROR", context).with_body(message)
+    }
+
+    pub fn fill(title: impl Into<String>, context: AlertContext) -> Self {
+        Self::new(AlertKind::Fill, title, context)
+    }
+
+    pub fn exit(title: impl Into<String>, context: AlertContext) -> Self {
+        Self::new(AlertKind::Exit, title, context)
+    }
+
+    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn with_body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    pub fn with_current_price(mut self, current_price: Option<String>) -> Self {
+        self.current_price = current_price;
+        self
     }
 }
 
@@ -136,7 +155,7 @@ mod tests {
         sender.try_send(Alert::error("b", AlertContext::default()));
 
         let first = rx.recv().await.expect("first alert should arrive");
-        assert_eq!(first.message, "a");
+        assert_eq!(first.body.as_deref(), Some("a"));
 
         assert!(rx.try_recv().is_err(), "second alert should be dropped");
     }

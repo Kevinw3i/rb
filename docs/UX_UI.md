@@ -23,7 +23,9 @@
 - Stderr events use `[YYYY-MM-DD HH:MM:SS] EVENT ...` and errors use `ERROR`.
 - Log file: `RB_LOG_PATH` (default `rb.log`), appends EVENT lines in UTC+8 unless `--no-log` is set.
 - Order/position EVENT logs include `current_price=<last_price>` when available.
-- Optional Telegram alerts: set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to receive best-effort async notifications for `ERROR` and `event=exit` (non-blocking; bounded queue may drop when full).
+- Optional Telegram alerts: set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to receive best-effort async notifications (non-blocking; bounded queue may drop when full).
+  - Alerts are sent for: `ERROR`, `ENTRY FILLED`, `TAKE PROFIT FILLED`, `STOP FILLED`, `ENTRY ABORT TRIGGERED`.
+  - Format: a header line (`rb <market> <symbol>`), then a bold title, then `key=value` lines (rendered via Telegram HTML parse mode).
 - Startup logs a warning event if trigger/order gap is >= 10%.
 - Rate-limit events include `rate_limit_status` and `rate_limit_backoff`.
 - Entry quantity rounding logs `entry_qty_round` (raw vs rounded) or `entry_qty_round_skip` if the rounded qty is zero.
