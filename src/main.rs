@@ -576,6 +576,7 @@ async fn main() {
     logger.set_context(config.market.as_str(), &config.symbol);
 
     let mut tg_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut tg_shutdown_timeout = Duration::from_secs(1);
     match telegram::TelegramConfig::from_env() {
         Ok(Some(cfg)) => {
             let thread_display = cfg
@@ -591,6 +592,9 @@ async fn main() {
                 cfg.timeout.as_secs(),
                 cfg.rate_limit_per_sec
             );
+            // Let shutdown wait at least one full Telegram request timeout,
+            // plus a small buffer for task scheduling/cleanup.
+            tg_shutdown_timeout = cfg.timeout + Duration::from_secs(1);
             let telegram::TelegramWorker { sender, handle } = telegram::spawn_telegram_worker(cfg);
             logger.set_alert_sender(sender);
             tg_handle = Some(handle);
@@ -759,13 +763,16 @@ async fn main() {
 
     logger.shutdown_alerting();
     if let Some(handle) = tg_handle {
-        match timeout(Duration::from_secs(1), handle).await {
+        match timeout(tg_shutdown_timeout, handle).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 logger.event(&format!("event=tg_worker_join_error err={err}"));
             }
             Err(_) => {
-                logger.event("event=tg_worker_join_timeout seconds=1");
+                logger.event(&format!(
+                    "event=tg_worker_join_timeout seconds={}",
+                    tg_shutdown_timeout.as_secs()
+                ));
             }
         }
     }

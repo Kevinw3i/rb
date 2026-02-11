@@ -64,3 +64,4 @@
 - Requests set `parse_mode=HTML` and render a bold title line (best-effort).
 - Enabled only when both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set.
 - Best-effort: failures/timeouts do not affect order processing.
+- On shutdown, sender handles are dropped before worker join; buffered alerts are drained without extra rate-limit sleep, and join timeout uses at least `TG_ALERT_TIMEOUT_SECS + 1s`.

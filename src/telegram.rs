@@ -164,7 +164,9 @@ pub fn spawn_telegram_worker(cfg: TelegramConfig) -> TelegramWorker {
             } else {
                 min_interval
             };
-            if !sleep_for.is_zero() {
+            // Once all senders are dropped, flush buffered alerts without
+            // extra throttling delay so shutdown can finish promptly.
+            if !rx.is_closed() && !sleep_for.is_zero() {
                 sleep(sleep_for).await;
             }
         }
@@ -299,6 +301,41 @@ mod tests {
             Ok(Ok(())) => {}
             Ok(Err(err)) => panic!("worker join error: {err}"),
             Err(_) => panic!("worker did not stop in time"),
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_worker_drains_pending_alerts_within_shutdown_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/botTEST_TOKEN/sendMessage"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let cfg = TelegramConfig {
+            api_base_url: server.uri(),
+            bot_token: "TEST_TOKEN".to_string(),
+            chat_id: "123".to_string(),
+            thread_id: None,
+            queue_size: 10,
+            timeout: Duration::from_secs(2),
+            rate_limit_per_sec: 1,
+        };
+
+        let TelegramWorker { sender, handle } = spawn_telegram_worker(cfg);
+        let ctx = AlertContext::for_symbol_market("futures", "BTCUSDC");
+        sender.try_send(Alert::error("event=test1", ctx.clone()));
+        sender.try_send(Alert::error("event=test2", ctx));
+
+        // Closing the channel should allow the worker to flush pending alerts
+        // before the same 1s shutdown timeout used by main.
+        drop(sender);
+        match tokio::time::timeout(Duration::from_secs(1), handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => panic!("worker join error: {err}"),
+            Err(_) => panic!("worker did not drain within shutdown timeout"),
         }
     }
 }

@@ -126,3 +126,8 @@
    - Enable Telegram alerts.
    - Configure `--entry-abort` and let price touch the abort threshold before entry fills.
    - Expect a Telegram message titled `ENTRY ABORT TRIGGERED` including `kind=entry_abort_touched` and `abort_price=...`.
+
+37. Telegram shutdown drain for final alerts
+   - Enable Telegram alerts and set `TG_ALERT_RATE_LIMIT_PER_SEC=1`.
+   - Trigger two alerts close together (for example `ENTRY FILLED` then `STOP FILLED`), then let process exit.
+   - Expect the final exit alert (`STOP FILLED`/`TAKE PROFIT FILLED`) to still be delivered before shutdown.

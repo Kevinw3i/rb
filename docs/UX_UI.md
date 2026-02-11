@@ -26,6 +26,7 @@
 - Optional Telegram alerts: set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to receive best-effort async notifications (non-blocking; bounded queue may drop when full).
   - Alerts are sent for: `ERROR`, `ENTRY FILLED`, `TAKE PROFIT FILLED`, `STOP FILLED`, `ENTRY ABORT TRIGGERED`.
   - Format: a header line (`rb <market> <symbol>`), then a bold title, then `key=value` lines (rendered via Telegram HTML parse mode).
+  - On process shutdown, queued Telegram alerts are drained in fast-flush mode (no extra throttle sleep), and worker wait time is at least request timeout + 1s.
 - Startup logs a warning event if trigger/order gap is >= 10%.
 - Rate-limit events include `rate_limit_status` and `rate_limit_backoff`.
 - Entry quantity rounding logs `entry_qty_round` (raw vs rounded) or `entry_qty_round_skip` if the rounded qty is zero.
