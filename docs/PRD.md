@@ -18,6 +18,7 @@
 - If the trigger/order gap is 10% or more, print a warning and continue.
 - Telegram alerts are fully asynchronous: the trading loop never `await`s Telegram I/O. Alerts are enqueued with a bounded `try_send` queue and are dropped if the queue is full; Telegram failures never affect order management.
   - Alerts are sent for: `ERROR` logs, `ENTRY FILLED` (first time a position opens), `TAKE PROFIT FILLED` / `STOP FILLED` (when the bot exits after a fill), and `ENTRY ABORT TRIGGERED`.
+  - Duplicate `ERROR` alerts are deduplicated for 60 seconds per `market + symbol + message` key to reduce noisy repeats.
   - On shutdown, alert senders are closed first and the Telegram worker drains queued alerts without extra throttling delay; shutdown wait time is at least `TG_ALERT_TIMEOUT_SECS + 1s` to reduce missed final exit alerts.
 - If order price < trigger price:
   - When latest price < trigger, if a position exists, ensure a reduce-only maker order

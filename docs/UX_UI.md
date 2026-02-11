@@ -25,6 +25,7 @@
 - Order/position EVENT logs include `current_price=<last_price>` when available.
 - Optional Telegram alerts: set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to receive best-effort async notifications (non-blocking; bounded queue may drop when full).
   - Alerts are sent for: `ERROR`, `ENTRY FILLED`, `TAKE PROFIT FILLED`, `STOP FILLED`, `ENTRY ABORT TRIGGERED`.
+  - Duplicate `ERROR` alerts are deduplicated for 60 seconds per `market + symbol + message` key.
   - Format: a header line (`rb <market> <symbol>`), then a bold title, then `key=value` lines (rendered via Telegram HTML parse mode).
   - On process shutdown, queued Telegram alerts are drained in fast-flush mode (no extra throttle sleep), and worker wait time is at least request timeout + 1s.
 - Startup logs a warning event if trigger/order gap is >= 10%.

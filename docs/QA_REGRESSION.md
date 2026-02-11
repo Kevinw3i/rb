@@ -6,6 +6,7 @@
 - Event logs print executed actions and are appended to the log file unless `--no-log` is set (EVENT only).
 - Order/position EVENT logs include `current_price=<last_price>` when available.
 - Telegram alerts (if enabled) are best-effort and non-blocking; failures/timeouts never affect order processing. Telegram messages are produced for `ERROR`, `ENTRY FILLED`, `TAKE PROFIT FILLED`, `STOP FILLED`, and `ENTRY ABORT TRIGGERED`.
+- Duplicate Telegram `ERROR` alerts are rate-limited: same `market + symbol + message` is sent at most once per 60 seconds.
 - On shutdown, Telegram worker drains buffered alerts in fast-flush mode and gets at least request timeout + 1s to finish, reducing dropped final exit notifications.
 - Startup warns on trigger/order gap >= 10% and continues.
 - Futures reduce-only orders are placed with `GTX` and canceled on trigger exit (bot-managed clientOrderId only).

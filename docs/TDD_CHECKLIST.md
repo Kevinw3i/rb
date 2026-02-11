@@ -14,6 +14,7 @@
 - [ ] Telegram alerts are sent via a bounded, non-blocking queue (`try_send`) and do not affect order management on failure.
 - [ ] Telegram sendMessage requests use `parse_mode=HTML` and HTML escaping so dynamic values can't break formatting.
 - [ ] Telegram message formatting truncates to <= 4096 chars.
+- [ ] Duplicate `ERROR` Telegram alerts are deduplicated for 60 seconds per `market + symbol + message` key.
 - [ ] Telegram fill alerts are emitted for `ENTRY FILLED`, and exit alerts are emitted for `TAKE PROFIT FILLED` / `STOP FILLED` / `ENTRY ABORT TRIGGERED` as applicable.
 - [ ] Telegram worker drains buffered alerts on shutdown without extra throttle sleep; shutdown join timeout is at least request timeout + 1s.
 - [ ] Warn on startup when trigger/order gap is >= 10%.

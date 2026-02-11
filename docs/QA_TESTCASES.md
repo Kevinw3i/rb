@@ -131,3 +131,8 @@
    - Enable Telegram alerts and set `TG_ALERT_RATE_LIMIT_PER_SEC=1`.
    - Trigger two alerts close together (for example `ENTRY FILLED` then `STOP FILLED`), then let process exit.
    - Expect the final exit alert (`STOP FILLED`/`TAKE PROFIT FILLED`) to still be delivered before shutdown.
+
+38. Telegram duplicate ERROR dedup within one minute
+   - Enable Telegram alerts and use credentials that repeatedly trigger the same error (for example, invalid Binance key causing repeated `event=position_refresh_error` with the same message).
+   - Observe stderr for repeated `ERROR` logs over one minute.
+   - Expect Telegram to deliver at most one alert per 60 seconds for the same `market + symbol + message`, while stderr still prints every error occurrence.

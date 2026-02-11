@@ -1,6 +1,7 @@
 mod alerting;
 mod telegram;
 
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::fs::OpenOptions;
@@ -15,8 +16,8 @@ use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::Sha256;
 use tokio::sync::Mutex as AsyncMutex;
@@ -61,6 +62,7 @@ const RATE_LIMIT_LOG_SECS: u64 = 30;
 const RATE_LIMIT_BACKOFF_INITIAL_SECS: u64 = 1;
 const RATE_LIMIT_MAX_BACKOFF_SECS: u64 = 120;
 const RATE_LIMIT_MAX_RETRIES: u32 = 3;
+const ERROR_ALERT_DEDUP_WINDOW_SECS: u64 = 60;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -230,6 +232,28 @@ struct LoggerInner {
     enabled: bool,
     alert_sender: StdMutex<Option<alerting::AlertSender>>,
     alert_context: StdMutex<alerting::AlertContext>,
+    error_alert_dedup: StdMutex<ErrorAlertDedupState>,
+}
+
+#[derive(Default)]
+struct ErrorAlertDedupState {
+    last_sent_at: HashMap<String, Instant>,
+}
+
+impl ErrorAlertDedupState {
+    fn should_send(&mut self, key: &str, now: Instant, window: Duration) -> bool {
+        if let Some(last_sent_at) = self.last_sent_at.get(key) {
+            if now.saturating_duration_since(*last_sent_at) < window {
+                return false;
+            }
+        }
+
+        self.last_sent_at.insert(key.to_string(), now);
+        // Keep only recent keys so the dedup map stays bounded over time.
+        self.last_sent_at
+            .retain(|_, sent_at| now.saturating_duration_since(*sent_at) <= window);
+        true
+    }
 }
 
 enum LogLevel {
@@ -264,6 +288,7 @@ impl Logger {
                 enabled,
                 alert_sender: StdMutex::new(None),
                 alert_context: StdMutex::new(alerting::AlertContext::default()),
+                error_alert_dedup: StdMutex::new(ErrorAlertDedupState::default()),
             }),
         })
     }
@@ -317,7 +342,28 @@ impl Logger {
 
     fn error(&self, message: &str) {
         self.log(LogLevel::Error, message, true);
-        self.send_alert(alerting::Alert::error(message, self.context()));
+        let context = self.context();
+        if self.should_send_error_alert(message, &context, Instant::now()) {
+            self.send_alert(alerting::Alert::error(message, context));
+        }
+    }
+
+    fn should_send_error_alert(
+        &self,
+        message: &str,
+        context: &alerting::AlertContext,
+        now: Instant,
+    ) -> bool {
+        let key = error_alert_key(context, message);
+        self.inner
+            .error_alert_dedup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .should_send(
+                &key,
+                now,
+                Duration::from_secs(ERROR_ALERT_DEDUP_WINDOW_SECS),
+            )
     }
 
     fn send_alert(&self, alert: alerting::Alert) {
@@ -353,6 +399,15 @@ impl Logger {
         writeln!(file, "{line}")?;
         file.flush()
     }
+}
+
+fn error_alert_key(context: &alerting::AlertContext, message: &str) -> String {
+    format!(
+        "{}|{}|{}",
+        context.market.as_deref().unwrap_or("-"),
+        context.symbol.as_deref().unwrap_or("-"),
+        message
+    )
 }
 
 struct RateLimitState {
@@ -626,10 +681,7 @@ async fn main() {
     log_price_gap_warning(&logger, config.trigger_price, config.order_price);
     if let Some(entry) = &config.entry {
         let entry_usdc = entry.entry_usdc_str.as_deref().unwrap_or("unset");
-        let entry_abort = config
-            .entry_abort_price_str
-            .as_deref()
-            .unwrap_or("unset");
+        let entry_abort = config.entry_abort_price_str.as_deref().unwrap_or("unset");
         let entry_qty = entry
             .entry_qty()
             .map(|(_, qty)| qty)
@@ -708,7 +760,11 @@ async fn main() {
 
     let market = config.market;
     let symbol = config.symbol.clone();
-    let ws_url = format!("{}/{}@aggTrade", market.ws_base_url(), symbol.to_ascii_lowercase());
+    let ws_url = format!(
+        "{}/{}@aggTrade",
+        market.ws_base_url(),
+        symbol.to_ascii_lowercase()
+    );
 
     let manager = Arc::new(AsyncMutex::new(OrderManager::new(
         config,
@@ -734,7 +790,9 @@ async fn main() {
             Ok((ws_stream, _)) => {
                 logger.event("event=connected");
                 backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
-                if let Err(err) = stream_last_price(ws_stream, manager.clone(), symbol.clone()).await {
+                if let Err(err) =
+                    stream_last_price(ws_stream, manager.clone(), symbol.clone()).await
+                {
                     logger.error(&format!("event=connection_error err={err}"));
                 }
                 if manager.lock().await.exit_requested() {
@@ -944,7 +1002,8 @@ impl OrderManager {
         &mut self,
         symbol: &str,
     ) -> Result<Vec<OpenOrder>, Box<dyn Error + Send + Sync>> {
-        if let (Some(last), Some(cache)) = (self.open_orders_cached_at, self.open_orders_cache.as_ref())
+        if let (Some(last), Some(cache)) =
+            (self.open_orders_cached_at, self.open_orders_cache.as_ref())
         {
             if last.elapsed() < Duration::from_secs(OPEN_ORDERS_CACHE_SECS) {
                 return Ok(cache.clone());
@@ -1186,8 +1245,9 @@ impl OrderManager {
                 self.symbol_filters = Some(filters);
             }
             Err(err) => {
-                self.logger
-                    .error(&format!("event=symbol_filters_error symbol={symbol} err={err}"));
+                self.logger.error(&format!(
+                    "event=symbol_filters_error symbol={symbol} err={err}"
+                ));
             }
         }
 
@@ -1216,9 +1276,7 @@ impl OrderManager {
         };
 
         if position.amt.abs() < f64::EPSILON {
-            self.event_with_price(&format!(
-                "event=manage_skip symbol={symbol} reason=flat"
-            ));
+            self.event_with_price(&format!("event=manage_skip symbol={symbol} reason=flat"));
             return Ok(());
         }
 
@@ -1327,9 +1385,7 @@ impl OrderManager {
                 self.cancel_orders(symbol, &managed_orders).await?;
                 self.tp_client_id = None;
             } else {
-                self.event_with_price(&format!(
-                    "event=cancel_skip symbol={symbol} reason=none"
-                ));
+                self.event_with_price(&format!("event=cancel_skip symbol={symbol} reason=none"));
             }
         }
 
@@ -1607,9 +1663,7 @@ impl OrderManager {
             };
 
             if stop_qty <= f64::EPSILON {
-                self.event_with_price(&format!(
-                    "event=stop_skip symbol={symbol} reason=no_qty"
-                ));
+                self.event_with_price(&format!("event=stop_skip symbol={symbol} reason=no_qty"));
                 return Ok(());
             }
 
@@ -1760,9 +1814,9 @@ impl BinanceClient {
             }
             MarketType::Spot => {
                 let base_asset = base_asset.ok_or("spot base asset missing")?;
-                let account: AccountInfo =
-                    self.signed_request(Method::GET, SPOT_ACCOUNT_PATH, Vec::new())
-                        .await?;
+                let account: AccountInfo = self
+                    .signed_request(Method::GET, SPOT_ACCOUNT_PATH, Vec::new())
+                    .await?;
                 let balance = account
                     .balances
                     .into_iter()
@@ -1813,13 +1867,15 @@ impl BinanceClient {
             MarketType::Futures => FUTURES_USER_STREAM_LISTEN_KEY_PATH,
             MarketType::Spot => SPOT_USER_STREAM_LISTEN_KEY_PATH,
         };
-        let response: ListenKeyResponse = self
-            .api_key_request(Method::POST, path, Vec::new())
-            .await?;
+        let response: ListenKeyResponse =
+            self.api_key_request(Method::POST, path, Vec::new()).await?;
         Ok(response.listen_key)
     }
 
-    async fn keepalive_user_stream(&self, listen_key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn keepalive_user_stream(
+        &self,
+        listen_key: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let path = match self.market {
             MarketType::Futures => FUTURES_USER_STREAM_LISTEN_KEY_PATH,
             MarketType::Spot => SPOT_USER_STREAM_LISTEN_KEY_PATH,
@@ -1829,15 +1885,16 @@ impl BinanceClient {
         Ok(())
     }
 
-    async fn close_user_stream(&self, listen_key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn close_user_stream(
+        &self,
+        listen_key: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let path = match self.market {
             MarketType::Futures => FUTURES_USER_STREAM_LISTEN_KEY_PATH,
             MarketType::Spot => SPOT_USER_STREAM_LISTEN_KEY_PATH,
         };
         let params = vec![("listenKey".to_string(), listen_key.to_string())];
-        let _: Value = self
-            .api_key_request(Method::DELETE, path, params)
-            .await?;
+        let _: Value = self.api_key_request(Method::DELETE, path, params).await?;
         Ok(())
     }
 
@@ -1848,10 +1905,7 @@ impl BinanceClient {
     ) -> Result<OrderStatus, Box<dyn Error + Send + Sync>> {
         let params = vec![
             ("symbol".to_string(), symbol.to_string()),
-            (
-                "origClientOrderId".to_string(),
-                client_order_id.to_string(),
-            ),
+            ("origClientOrderId".to_string(), client_order_id.to_string()),
         ];
         let path = match self.market {
             MarketType::Futures => FUTURES_ORDER_PATH,
@@ -1898,10 +1952,7 @@ impl BinanceClient {
                     ("quantity".to_string(), quantity.to_string()),
                     ("price".to_string(), price.to_string()),
                     ("reduceOnly".to_string(), "true".to_string()),
-                    (
-                        "newClientOrderId".to_string(),
-                        client_order_id.to_string(),
-                    ),
+                    ("newClientOrderId".to_string(), client_order_id.to_string()),
                 ];
                 if position_side != "BOTH" {
                     params.push(("positionSide".to_string(), position_side.to_string()));
@@ -1915,10 +1966,7 @@ impl BinanceClient {
                     ("type".to_string(), "LIMIT_MAKER".to_string()),
                     ("quantity".to_string(), quantity.to_string()),
                     ("price".to_string(), price.to_string()),
-                    (
-                        "newClientOrderId".to_string(),
-                        client_order_id.to_string(),
-                    ),
+                    ("newClientOrderId".to_string(), client_order_id.to_string()),
                 ];
                 (SPOT_ORDER_PATH, params)
             }
@@ -1945,10 +1993,7 @@ impl BinanceClient {
             ("timeInForce".to_string(), "GTX".to_string()),
             ("quantity".to_string(), quantity.to_string()),
             ("price".to_string(), price.to_string()),
-            (
-                "newClientOrderId".to_string(),
-                client_order_id.to_string(),
-            ),
+            ("newClientOrderId".to_string(), client_order_id.to_string()),
         ];
 
         self.signed_request(Method::POST, FUTURES_ORDER_PATH, params)
@@ -2002,9 +2047,7 @@ impl BinanceClient {
             MarketType::Futures => FUTURES_ORDER_PATH,
             MarketType::Spot => SPOT_ORDER_PATH,
         };
-        let _: Value = self
-            .signed_request(Method::DELETE, path, params)
-            .await?;
+        let _: Value = self.signed_request(Method::DELETE, path, params).await?;
         Ok(())
     }
 
@@ -2102,7 +2145,11 @@ impl BinanceClient {
         let should_log = {
             let mut state = self.rate_limit_state.lock().unwrap();
             match state.last_logged_at {
-                Some(last) if now.duration_since(last) < Duration::from_secs(RATE_LIMIT_LOG_SECS) => false,
+                Some(last)
+                    if now.duration_since(last) < Duration::from_secs(RATE_LIMIT_LOG_SECS) =>
+                {
+                    false
+                }
                 _ => {
                     state.last_logged_at = Some(now);
                     true
@@ -2111,8 +2158,10 @@ impl BinanceClient {
         };
 
         if should_log {
-            self.logger
-                .event(&format!("event=rate_limit_status path={path} {}", parts.join(" ")));
+            self.logger.event(&format!(
+                "event=rate_limit_status path={path} {}",
+                parts.join(" ")
+            ));
         }
     }
 
@@ -2174,8 +2223,7 @@ impl BinanceClient {
         path: &str,
         params: Vec<(String, String)>,
     ) -> Result<T, Box<dyn Error + Send + Sync>> {
-        self.request_with_backoff(method, path, params, false)
-            .await
+        self.request_with_backoff(method, path, params, false).await
     }
 
     async fn signed_request<T: DeserializeOwned>(
@@ -2184,8 +2232,7 @@ impl BinanceClient {
         path: &str,
         params: Vec<(String, String)>,
     ) -> Result<T, Box<dyn Error + Send + Sync>> {
-        self.request_with_backoff(method, path, params, true)
-            .await
+        self.request_with_backoff(method, path, params, true).await
     }
 
     async fn request_with_backoff<T: DeserializeOwned>(
@@ -2215,10 +2262,7 @@ impl BinanceClient {
             let url = if signed {
                 let mut signed_params = params.clone();
                 signed_params.push(("timestamp".to_string(), now_millis().to_string()));
-                signed_params.push((
-                    "recvWindow".to_string(),
-                    RECV_WINDOW_MS.to_string(),
-                ));
+                signed_params.push(("recvWindow".to_string(), RECV_WINDOW_MS.to_string()));
                 let query = signed_params
                     .iter()
                     .map(|(key, value)| format!("{key}={value}"))
@@ -2322,17 +2366,16 @@ async fn run_user_stream(
             Ok((ws_stream, _)) => {
                 logger.event("event=user_stream_connected");
                 backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
-                if let Err(err) =
-                    stream_user_data(
-                        ws_stream,
-                        &client,
-                        &manager,
-                        &logger,
-                        market,
-                        &symbol,
-                        &listen_key,
-                    )
-                    .await
+                if let Err(err) = stream_user_data(
+                    ws_stream,
+                    &client,
+                    &manager,
+                    &logger,
+                    market,
+                    &symbol,
+                    &listen_key,
+                )
+                .await
                 {
                     logger.error(&format!("event=user_stream_error err={err}"));
                 }
@@ -2499,11 +2542,17 @@ fn parse_trade_event(text: &str) -> Option<(String, String, u64)> {
 fn format_event_time(event_time_ms: u64) -> Option<String> {
     let utc_time = DateTime::<Utc>::from_timestamp_millis(event_time_ms as i64)?;
     let offset = FixedOffset::east_opt(8 * 3600)?;
-    Some(utc_time.with_timezone(&offset).format("%Y-%m-%d %H:%M:%S").to_string())
+    Some(
+        utc_time
+            .with_timezone(&offset)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    )
 }
 
 fn log_timestamp() -> String {
-    let offset = FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let offset =
+        FixedOffset::east_opt(8 * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
     Utc::now()
         .with_timezone(&offset)
         .format("%Y-%m-%d %H:%M:%S")
@@ -2661,7 +2710,10 @@ fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, 
                     return None;
                 }
                 let symbol = order.get("s")?.as_str()?.to_string();
-                let side = order.get("S").and_then(|value| value.as_str()).map(|v| v.to_string());
+                let side = order
+                    .get("S")
+                    .and_then(|value| value.as_str())
+                    .map(|v| v.to_string());
                 let qty = order
                     .get("z")
                     .or_else(|| order.get("q"))
@@ -2691,7 +2743,10 @@ fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, 
                     return None;
                 }
                 let symbol = order.get("s")?.as_str()?.to_string();
-                let side = order.get("S").and_then(|value| value.as_str()).map(|v| v.to_string());
+                let side = order
+                    .get("S")
+                    .and_then(|value| value.as_str())
+                    .map(|v| v.to_string());
                 let qty = order
                     .get("q")
                     .and_then(|value| value.as_str())
@@ -2723,7 +2778,10 @@ fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, 
                 return None;
             }
             let symbol = value.get("s")?.as_str()?.to_string();
-            let side = value.get("S").and_then(|value| value.as_str()).map(|v| v.to_string());
+            let side = value
+                .get("S")
+                .and_then(|value| value.as_str())
+                .map(|v| v.to_string());
             let qty = value
                 .get("z")
                 .and_then(|value| value.as_str())
@@ -2740,6 +2798,67 @@ fn parse_user_stream_exit(value: &Value, market: MarketType) -> Option<(String, 
             };
             Some((symbol, "order_filled".to_string(), fill))
         }
+    }
+}
+
+#[cfg(test)]
+mod logger_tests {
+    use super::*;
+
+    #[test]
+    fn error_alert_dedup_suppresses_duplicate_key_within_window() {
+        let mut state = ErrorAlertDedupState::default();
+        let window = Duration::from_secs(ERROR_ALERT_DEDUP_WINDOW_SECS);
+        let start = Instant::now();
+        let key = "futures|BTCUSDC|event=position_refresh_error err=test";
+
+        assert!(state.should_send(key, start, window));
+        assert!(!state.should_send(key, start + Duration::from_secs(59), window));
+    }
+
+    #[test]
+    fn error_alert_dedup_allows_duplicate_key_after_window() {
+        let mut state = ErrorAlertDedupState::default();
+        let window = Duration::from_secs(ERROR_ALERT_DEDUP_WINDOW_SECS);
+        let start = Instant::now();
+        let key = "futures|BTCUSDC|event=position_refresh_error err=test";
+
+        assert!(state.should_send(key, start, window));
+        assert!(state.should_send(key, start + Duration::from_secs(60), window));
+    }
+
+    #[test]
+    fn error_alert_key_is_scoped_by_context() {
+        let message = "event=position_refresh_error err=binance api error 401";
+        let btc_key = error_alert_key(
+            &alerting::AlertContext::for_symbol_market("futures", "BTCUSDC"),
+            message,
+        );
+        let eth_key = error_alert_key(
+            &alerting::AlertContext::for_symbol_market("futures", "ETHUSDC"),
+            message,
+        );
+
+        assert_ne!(btc_key, eth_key);
+    }
+
+    #[test]
+    fn logger_error_alert_is_rate_limited_but_errors_still_log() {
+        let logger = Logger::new(PathBuf::from("unused.log"), false).expect("logger should init");
+        logger.set_context("futures", "BTCUSDC");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<alerting::Alert>(8);
+        logger.set_alert_sender(alerting::AlertSender::new(tx));
+
+        let message = "event=position_refresh_error err=binance api error 401 Unauthorized";
+        logger.error(message);
+        logger.error(message);
+
+        let first = rx.try_recv().expect("first alert should be sent");
+        assert_eq!(first.body.as_deref(), Some(message));
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate error alert within one minute should be suppressed"
+        );
     }
 }
 
@@ -3039,21 +3158,17 @@ fn parse_args() -> Result<Config, String> {
         }
     }
 
-    let symbol_raw = symbol_input
-        .ok_or_else(|| "symbol is required\n".to_string() + &usage())?;
+    let symbol_raw = symbol_input.ok_or_else(|| "symbol is required\n".to_string() + &usage())?;
     let symbol = normalize_symbol(&symbol_raw)
         .ok_or_else(|| "invalid symbol format\n".to_string() + &usage())?;
-    let market_raw = market_input
-        .ok_or_else(|| "market is required\n".to_string() + &usage())?;
+    let market_raw = market_input.ok_or_else(|| "market is required\n".to_string() + &usage())?;
     let market = parse_market(&market_raw)
         .ok_or_else(|| "market must be futures or spot\n".to_string() + &usage())?;
 
     let trigger_str = trigger_price.ok_or_else(usage)?;
     let order_str = order_price.ok_or_else(usage)?;
 
-    let trigger = trigger_str
-        .parse::<f64>()
-        .map_err(|_| usage())?;
+    let trigger = trigger_str.parse::<f64>().map_err(|_| usage())?;
     let order = order_str.parse::<f64>().map_err(|_| usage())?;
 
     if (order - trigger).abs() < f64::EPSILON {
@@ -3116,19 +3231,13 @@ fn parse_args() -> Result<Config, String> {
                 leverage_provided,
             })
         }
-        _ => {
-            return Err(
-                "entry options require --entry --stop --side\n".to_string() + &usage(),
-            )
-        }
+        _ => return Err("entry options require --entry --stop --side\n".to_string() + &usage()),
     };
 
     let entry_abort_parsed = match entry_abort {
         Some(value) => {
             if entry.is_none() {
-                return Err(
-                    "--entry-abort requires --entry --stop --side\n".to_string() + &usage(),
-                );
+                return Err("--entry-abort requires --entry --stop --side\n".to_string() + &usage());
             }
             let price = value.parse::<f64>().map_err(|_| usage())?;
             if price <= 0.0 {
