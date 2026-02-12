@@ -5,6 +5,11 @@ cargo run -- --symbol BTC/USDC --market futures --trigger 95450 --order 93658.7
 用法重點：
 - 必填：--symbol <pair>、--market <futures|spot>、--trigger <price>、--order <price>
 - 進階買入/止損：--entry <price> --stop <price> --side <long|short> 三個必須一起給
+- 掛單啟動門檻：--entry-arm <price>（需搭配 entry/stop/side）
+  - 未觸發前不會新掛 entry；會取消既有 entry 單
+  - 未持倉時才會取消既有 stop 單；已持倉時保留並同步 stop
+  - 若未觸發前已持倉，仍會維持 stop 保護單
+  - 觸發方向：entry-arm >= entry 用上穿；entry-arm < entry 用下穿
 - 若沒有現成的買入單（預設只認 rb-entry- 前綴），就必須提供買入金額：--entry-usdc <amount> 或 RB_ENTRY_USDC
 - 槓桿：--leverage <n> 或 RB_ENTRY_LEVERAGE，未提供就用 100
 - 買入數量：qty = entry_usdc * leverage / entry_price
@@ -34,6 +39,11 @@ rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 \
 rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 \
   --entry 70000 --stop 69000 --side long \
   --entry-detect any
+
+範例（到價後才開始掛 entry/stop）：
+rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 \
+  --entry 70000 --stop 69000 --side long \
+  --entry-arm 70100 --entry-usdc 50 --leverage 20
 
 範例（關閉 log 檔寫入）：
 rb --symbol BTC/USDC --market futures --trigger 70000 --order 70500 --no-log

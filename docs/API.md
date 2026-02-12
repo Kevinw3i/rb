@@ -52,6 +52,9 @@
 - Stop-loss/take-profit fills trigger an exit after canceling remaining managed orders.
 - If `--entry-abort` is set and price reaches that level before entry fills, entry/stop orders are canceled and the task exits.
 - If an entry order already exists at startup (per entry detection), `--entry-abort` is ignored for this run.
+- If `--entry-arm` is set, entry/stop orders are armed only after price reaches the arm threshold (above if arm >= entry, below if arm < entry).
+- Before `--entry-arm` is touched, detected entry orders are canceled; stop orders are canceled only when no position exists.
+- If a position exists, stop-loss orders are preserved and synchronized without forced cancel/recreate on each manage cycle.
 
 ## Order Detection
 - Entry detection mode `prefix` (default) only treats `rb-entry-` orders as entry orders.

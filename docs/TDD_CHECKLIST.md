@@ -28,9 +28,15 @@
 - [ ] TP/stop fills cancel remaining managed orders and exit.
 - [ ] User data stream listenKey is created/kept alive and triggers exit on TP/stop fills.
 - [ ] `--entry/--stop/--side` are optional but must be provided together.
+- [ ] Reject `--entry-arm` when `--entry/--stop/--side` are not all present.
+- [ ] Reject non-positive `--entry-arm` values.
 - [ ] Entry order uses maker-only LIMIT at `--entry` (GTX) with `entry_usdc * leverage / entry_price`.
 - [ ] Entry order quantity is floored to the LOT_SIZE step from exchange info (log raw vs rounded).
 - [ ] Entry order placement requires entry USDC amount; leverage defaults to 100.
+- [ ] If `--entry-arm` is set, entry/stop stays inactive until arm threshold is touched (above if arm >= entry, below if arm < entry).
+- [ ] Before `--entry-arm` is touched, detected entry orders are canceled.
+- [ ] Before `--entry-arm` is touched, stop orders are canceled only when no position exists.
+- [ ] Before `--entry-arm` is touched, existing positions still keep stop-loss protection active.
 - [ ] When entry USDC and leverage are provided, startup cancels same-price entry/stop orders before placing refreshed orders.
 - [ ] Once a position is opened, no new entry orders are placed.
 - [ ] If `--entry-abort` is set and price reaches that level before entry fills, cancel open entry/stop orders and exit.

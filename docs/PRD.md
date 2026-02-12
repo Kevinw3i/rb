@@ -8,10 +8,11 @@
 - Optionally manage a maker-only entry order and a reduce-only stop-loss flow (futures only).
 
 ## Inputs
-- CLI: required `--symbol <pair>` and `--market <futures|spot>`, required `--trigger <price>`, `--order <price>`, optional `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]`, optional `--no-log` to disable log file writes.
+- CLI: required `--symbol <pair>` and `--market <futures|spot>`, required `--trigger <price>`, `--order <price>`, optional `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-arm <price>] [--entry-abort <price>]`, optional `--no-log` to disable log file writes.
 - Environment: `BINANCE_API_KEY`, `BINANCE_API_SECRET`, optional `BINANCE_BASE_URL`/`BINANCE_EXCHANGE_BASE_URL` (defaults depend on market), optional `RB_LOG_PATH` (default `rb.log`), optional `RB_ENTRY_USDC` (entry notional), optional `RB_ENTRY_LEVERAGE` (default 100), optional `RB_ENTRY_DETECT` (`prefix` or `any`).
 - Telegram alerts (optional): set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` to enable best-effort async alerts for `ERROR` and `event=exit`. Optional: `TELEGRAM_MESSAGE_THREAD_ID`, `TG_API_BASE_URL`, `TG_ALERT_QUEUE_SIZE`, `TG_ALERT_TIMEOUT_SECS`, `TG_ALERT_RATE_LIMIT_PER_SEC`.
 - `--entry/--stop/--side` must be provided together; entry order placement requires an entry USDC amount (futures only).
+- `--entry-arm` requires `--entry/--stop/--side` and must be `> 0` when provided.
 
 ## Behavior
 - On startup, validate the requested symbol exists for the selected market. If invalid, warn and exit without running.
@@ -33,6 +34,10 @@
 - If the take-profit or stop-loss order fills, cancel remaining managed orders and exit.
 - User data stream (market-specific) listens for fills and triggers the same exit flow.
 - Optional entry/stop flow (independent of trigger/order):
+  - If `--entry-arm` is set, entry/stop management is armed only after price reaches arm threshold (above if arm >= entry, below if arm < entry).
+  - Before `--entry-arm` is touched, detected entry orders are canceled; stop-loss orders are canceled only when no position exists.
+  - If a position already exists before arm is touched, existing stop-loss orders are preserved and synchronized (no forced stop cancel/recreate loop).
+  - Once `--entry-arm` is touched, entry/stop flow remains armed for this run.
   - Place a maker-only LIMIT entry order at `--entry` using `entry_usdc * leverage / entry_price`.
   - Entry quantity is floored to the symbol LOT_SIZE step from exchange info; raw vs rounded qty is logged, and placement is skipped if the rounded qty is zero.
   - When both `entry_usdc` and `leverage` are provided, the first manage cycle cancels same-price entry/stop orders (matching side) before placing fresh orders with the computed rounded quantity.

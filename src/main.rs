@@ -201,6 +201,8 @@ struct Config {
     log_enabled: bool,
     entry: Option<EntryConfig>,
     entry_detect: EntryDetect,
+    entry_arm_price: Option<f64>,
+    entry_arm_price_str: Option<String>,
     entry_abort_price: Option<f64>,
     entry_abort_price_str: Option<String>,
     base_asset: Option<String>,
@@ -606,6 +608,8 @@ struct OrderManager {
     entry_round_logged: bool,
     entry_startup_cleanup_done: bool,
     entry_abort_checked: bool,
+    entry_arm_triggered: bool,
+    entry_arm_checked_once: bool,
 }
 
 type SharedManager = Arc<AsyncMutex<OrderManager>>;
@@ -681,13 +685,14 @@ async fn main() {
     log_price_gap_warning(&logger, config.trigger_price, config.order_price);
     if let Some(entry) = &config.entry {
         let entry_usdc = entry.entry_usdc_str.as_deref().unwrap_or("unset");
+        let entry_arm = config.entry_arm_price_str.as_deref().unwrap_or("unset");
         let entry_abort = config.entry_abort_price_str.as_deref().unwrap_or("unset");
         let entry_qty = entry
             .entry_qty()
             .map(|(_, qty)| qty)
             .unwrap_or_else(|| "unset".to_string());
         logger.event(&format!(
-            "event=entry_config entry={} stop={} side={} entry_usdc={} leverage={} entry_qty={} entry_detect={} entry_abort={}",
+            "event=entry_config entry={} stop={} side={} entry_usdc={} leverage={} entry_qty={} entry_detect={} entry_arm={} entry_abort={}",
             entry.entry_price_str,
             entry.stop_price_str,
             entry.side.as_str(),
@@ -695,6 +700,7 @@ async fn main() {
             entry.leverage,
             entry_qty,
             config.entry_detect.as_str(),
+            entry_arm,
             entry_abort
         ));
     }
@@ -838,6 +844,7 @@ async fn main() {
 
 impl OrderManager {
     fn new(config: Config, client: BinanceClient, logger: Logger) -> Self {
+        let entry_arm_triggered = config.entry_arm_price.is_none();
         Self {
             client,
             config,
@@ -865,6 +872,8 @@ impl OrderManager {
             entry_round_logged: false,
             entry_startup_cleanup_done: false,
             entry_abort_checked: false,
+            entry_arm_triggered,
+            entry_arm_checked_once: false,
         }
     }
 
@@ -1428,6 +1437,124 @@ impl OrderManager {
             .into_iter()
             .filter(|o| o.client_strategy_id.starts_with(STOP_CLIENT_ID_PREFIX))
             .collect();
+        self.stop_client_id = stop_orders.first().map(|o| o.client_strategy_id.clone());
+        let position = self.last_position.clone().unwrap_or(PositionSnapshot {
+            amt: 0.0,
+            amt_str: "0".to_string(),
+            position_side: "BOTH".to_string(),
+        });
+        let position_qty_str = abs_str(&position.amt_str);
+        let position_qty = position_qty_str.parse::<f64>().unwrap_or(0.0);
+        let has_position = position.amt.abs() > f64::EPSILON;
+
+        if !self.entry_abort_checked {
+            self.entry_abort_checked = true;
+            if self.config.entry_abort_price.is_some() && had_entry_orders_at_start {
+                self.event_with_price(&format!(
+                    "event=entry_abort_disabled symbol={symbol} reason=existing_entry_orders count={}",
+                    entry_orders_start_count
+                ));
+                self.config.entry_abort_price = None;
+                self.config.entry_abort_price_str = None;
+            }
+        }
+
+        if has_position && !self.entry_completed {
+            self.entry_completed = true;
+            self.event_with_price(&format!("event=entry_completed symbol={symbol}"));
+
+            let mut alert = alerting::Alert::fill(
+                "ENTRY FILLED",
+                alerting::AlertContext::for_symbol_market(self.config.market.as_str(), symbol),
+            )
+            .with_field("kind", "entry_filled");
+            let side = if position.amt > 0.0 { "LONG" } else { "SHORT" };
+            alert = alert.with_field("side", side);
+            alert = alert.with_field("qty", position_qty_str.clone());
+            if let Some(price_str) = &self.last_price_str {
+                alert = alert.with_field("price", price_str.clone());
+            }
+            if let Some(client_id) = &self.entry_client_id {
+                alert = alert.with_field("client_id", client_id.clone());
+            }
+            alert = alert
+                .with_field("entry_price", entry.entry_price_str.clone())
+                .with_field("stop_price", entry.stop_price_str.clone());
+            self.logger.send_alert(alert);
+        }
+
+        if let Some(entry_arm) = self.config.entry_arm_price {
+            let arm_mode = if entry_arm >= entry.entry_price {
+                "above"
+            } else {
+                "below"
+            };
+            let arm_price_str = self
+                .config
+                .entry_arm_price_str
+                .clone()
+                .unwrap_or_else(|| "unset".to_string());
+            if !self.entry_arm_checked_once {
+                self.entry_arm_checked_once = true;
+                self.event_with_price(&format!(
+                    "event=entry_arm_config symbol={symbol} arm={arm_price_str} armed={} mode={arm_mode}",
+                    self.entry_arm_triggered
+                ));
+            }
+
+            if !self.entry_arm_triggered {
+                if entry_arm_touched(entry.entry_price, entry_arm, price) {
+                    self.entry_arm_triggered = true;
+                    self.event_with_price(&format!(
+                        "event=entry_arm_triggered symbol={symbol} arm={arm_price_str} mode={arm_mode}"
+                    ));
+                } else {
+                    let entry_cancel_count = entry_orders.len();
+                    let should_cancel_stops_while_waiting =
+                        should_cancel_stops_while_entry_arm_waiting(has_position);
+                    let stop_cancel_count = if should_cancel_stops_while_waiting {
+                        stop_orders.len()
+                    } else {
+                        0
+                    };
+                    if entry_cancel_count > 0 || stop_cancel_count > 0 {
+                        self.event_with_price(&format!(
+                            "event=entry_arm_cleanup symbol={symbol} entry_cancel={entry_cancel_count} stop_cancel={stop_cancel_count}"
+                        ));
+                    }
+                    if entry_cancel_count > 0 {
+                        self.cancel_orders(symbol, &entry_orders).await?;
+                        entry_orders.clear();
+                        self.entry_client_id = None;
+                    }
+                    if should_cancel_stops_while_waiting && stop_cancel_count > 0 {
+                        self.cancel_conditional_orders(symbol, &stop_orders).await?;
+                        stop_orders.clear();
+                        self.stop_client_id = None;
+                    }
+                    if entry_cancel_count > 0 || stop_cancel_count > 0 {
+                        self.clear_open_orders_cache();
+                    }
+                    self.event_with_price(&format!(
+                        "event=entry_arm_wait symbol={symbol} arm={arm_price_str} mode={arm_mode}"
+                    ));
+
+                    if has_position {
+                        self.sync_stop_orders(
+                            symbol,
+                            &entry,
+                            &position,
+                            &stop_orders,
+                            position_qty,
+                            &position_qty_str,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         let should_startup_cleanup = !self.entry_startup_cleanup_done
             && entry.entry_usdc_provided
             && entry.leverage_provided;
@@ -1466,51 +1593,8 @@ impl OrderManager {
             }
             self.entry_startup_cleanup_done = true;
         }
-        self.stop_client_id = stop_orders.first().map(|o| o.client_strategy_id.clone());
 
         let has_entry_orders = !entry_orders.is_empty();
-        if !self.entry_abort_checked {
-            self.entry_abort_checked = true;
-            if self.config.entry_abort_price.is_some() && had_entry_orders_at_start {
-                self.event_with_price(&format!(
-                    "event=entry_abort_disabled symbol={symbol} reason=existing_entry_orders count={}",
-                    entry_orders_start_count
-                ));
-                self.config.entry_abort_price = None;
-                self.config.entry_abort_price_str = None;
-            }
-        }
-        let position = self.last_position.clone().unwrap_or(PositionSnapshot {
-            amt: 0.0,
-            amt_str: "0".to_string(),
-            position_side: "BOTH".to_string(),
-        });
-        let position_qty_str = abs_str(&position.amt_str);
-        let position_qty = position_qty_str.parse::<f64>().unwrap_or(0.0);
-        let has_position = position.amt.abs() > f64::EPSILON;
-        if has_position && !self.entry_completed {
-            self.entry_completed = true;
-            self.event_with_price(&format!("event=entry_completed symbol={symbol}"));
-
-            let mut alert = alerting::Alert::fill(
-                "ENTRY FILLED",
-                alerting::AlertContext::for_symbol_market(self.config.market.as_str(), symbol),
-            )
-            .with_field("kind", "entry_filled");
-            let side = if position.amt > 0.0 { "LONG" } else { "SHORT" };
-            alert = alert.with_field("side", side);
-            alert = alert.with_field("qty", position_qty_str.clone());
-            if let Some(price_str) = &self.last_price_str {
-                alert = alert.with_field("price", price_str.clone());
-            }
-            if let Some(client_id) = &self.entry_client_id {
-                alert = alert.with_field("client_id", client_id.clone());
-            }
-            alert = alert
-                .with_field("entry_price", entry.entry_price_str.clone())
-                .with_field("stop_price", entry.stop_price_str.clone());
-            self.logger.send_alert(alert);
-        }
         let mut entry_qty = entry.entry_qty();
         let mut entry_qty_reason: Option<&str> = None;
         if entry_qty.is_none() {
@@ -1661,67 +1745,15 @@ impl OrderManager {
             } else {
                 (0.0, "0".to_string())
             };
-
-            if stop_qty <= f64::EPSILON {
-                self.event_with_price(&format!("event=stop_skip symbol={symbol} reason=no_qty"));
-                return Ok(());
-            }
-
-            let expected_side = entry.side.stop_side();
-            let mut has_expected = false;
-
-            for order in &stop_orders {
-                if is_expected_stop_order(order, expected_side, entry.stop_price, stop_qty) {
-                    has_expected = true;
-                    continue;
-                }
-                has_expected = false;
-                break;
-            }
-
-            if has_expected && stop_orders.len() == 1 {
-                self.event_with_price(&format!(
-                    "event=stop_orders_ok symbol={symbol} stop={} qty={}",
-                    entry.stop_price_str, stop_qty_str
-                ));
-                return Ok(());
-            }
-
-            if !stop_orders.is_empty() {
-                self.event_with_price(&format!(
-                    "event=stop_cancel_orders symbol={symbol} count={}",
-                    stop_orders.len()
-                ));
-                self.cancel_conditional_orders(symbol, &stop_orders).await?;
-                self.stop_client_id = None;
-            }
-
-            let client_order_id = format!("{STOP_CLIENT_ID_PREFIX}{}", now_millis());
-            let position_side = if position.position_side != "BOTH" {
-                Some(position.position_side.as_str())
-            } else {
-                None
-            };
-            let order = self
-                .client
-                .place_stop_market(
-                    symbol,
-                    expected_side,
-                    &stop_qty_str,
-                    &entry.stop_price_str,
-                    position_side,
-                    &client_order_id,
-                )
-                .await?;
-            self.event_with_price(&format!(
-                "event=stop_place_order symbol={symbol} order_id={} client_id={} side={} stop={} qty={}",
-                order.order_id,
-                order.client_order_id,
-                expected_side,
-                entry.stop_price_str,
-                stop_qty_str
-            ));
-            self.stop_client_id = Some(order.client_order_id);
+            self.sync_stop_orders(
+                symbol,
+                &entry,
+                &position,
+                &stop_orders,
+                stop_qty,
+                &stop_qty_str,
+            )
+            .await?;
         } else if !stop_orders.is_empty() {
             self.event_with_price(&format!(
                 "event=stop_cancel_orders symbol={symbol} count={}",
@@ -1730,6 +1762,79 @@ impl OrderManager {
             self.cancel_conditional_orders(symbol, &stop_orders).await?;
             self.stop_client_id = None;
         }
+
+        Ok(())
+    }
+
+    async fn sync_stop_orders(
+        &mut self,
+        symbol: &str,
+        entry: &EntryConfig,
+        position: &PositionSnapshot,
+        stop_orders: &[ConditionalOrder],
+        stop_qty: f64,
+        stop_qty_str: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if stop_qty <= f64::EPSILON {
+            self.event_with_price(&format!("event=stop_skip symbol={symbol} reason=no_qty"));
+            return Ok(());
+        }
+
+        let expected_side = entry.side.stop_side();
+        let mut has_expected = false;
+
+        for order in stop_orders {
+            if is_expected_stop_order(order, expected_side, entry.stop_price, stop_qty) {
+                has_expected = true;
+                continue;
+            }
+            has_expected = false;
+            break;
+        }
+
+        if has_expected && stop_orders.len() == 1 {
+            self.event_with_price(&format!(
+                "event=stop_orders_ok symbol={symbol} stop={} qty={}",
+                entry.stop_price_str, stop_qty_str
+            ));
+            return Ok(());
+        }
+
+        if !stop_orders.is_empty() {
+            self.event_with_price(&format!(
+                "event=stop_cancel_orders symbol={symbol} count={}",
+                stop_orders.len()
+            ));
+            self.cancel_conditional_orders(symbol, stop_orders).await?;
+            self.stop_client_id = None;
+        }
+
+        let client_order_id = format!("{STOP_CLIENT_ID_PREFIX}{}", now_millis());
+        let position_side = if position.position_side != "BOTH" {
+            Some(position.position_side.as_str())
+        } else {
+            None
+        };
+        let order = self
+            .client
+            .place_stop_market(
+                symbol,
+                expected_side,
+                stop_qty_str,
+                &entry.stop_price_str,
+                position_side,
+                &client_order_id,
+            )
+            .await?;
+        self.event_with_price(&format!(
+            "event=stop_place_order symbol={symbol} order_id={} client_id={} side={} stop={} qty={}",
+            order.order_id,
+            order.client_order_id,
+            expected_side,
+            entry.stop_price_str,
+            stop_qty_str
+        ));
+        self.stop_client_id = Some(order.client_order_id);
 
         Ok(())
     }
@@ -2949,6 +3054,149 @@ mod user_stream_tests {
     }
 }
 
+#[cfg(test)]
+mod entry_arm_tests {
+    use super::*;
+
+    #[test]
+    fn entry_arm_touched_uses_upper_direction_when_arm_at_or_above_entry() {
+        assert!(entry_arm_touched(100.0, 110.0, 110.0));
+        assert!(entry_arm_touched(100.0, 110.0, 111.0));
+        assert!(!entry_arm_touched(100.0, 110.0, 109.9));
+        assert!(entry_arm_touched(100.0, 100.0, 100.0));
+        assert!(entry_arm_touched(100.0, 100.0, 100.1));
+        assert!(!entry_arm_touched(100.0, 100.0, 99.9));
+    }
+
+    #[test]
+    fn entry_arm_touched_uses_lower_direction_when_arm_below_entry() {
+        assert!(entry_arm_touched(100.0, 95.0, 95.0));
+        assert!(entry_arm_touched(100.0, 95.0, 94.9));
+        assert!(!entry_arm_touched(100.0, 95.0, 95.1));
+    }
+
+    #[test]
+    fn entry_arm_waiting_cancels_stops_only_when_flat() {
+        assert!(should_cancel_stops_while_entry_arm_waiting(false));
+        assert!(!should_cancel_stops_while_entry_arm_waiting(true));
+    }
+}
+
+#[cfg(test)]
+mod parse_args_tests {
+    use super::*;
+
+    fn parse_ok(args: &[&str]) -> Config {
+        parse_args_from(
+            args.iter().map(|value| value.to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("parse_args_from should succeed")
+    }
+
+    fn parse_err(args: &[&str]) -> String {
+        match parse_args_from(
+            args.iter().map(|value| value.to_string()),
+            None,
+            None,
+            None,
+        ) {
+            Ok(_) => panic!("parse_args_from should fail"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn parse_args_accepts_entry_arm_with_entry_options() {
+        let cfg = parse_ok(&[
+            "--symbol",
+            "BTC/USDC",
+            "--market",
+            "futures",
+            "--trigger",
+            "70000",
+            "--order",
+            "70500",
+            "--entry",
+            "70000",
+            "--stop",
+            "69000",
+            "--side",
+            "long",
+            "--entry-arm",
+            "70100",
+        ]);
+
+        assert_eq!(cfg.entry_arm_price, Some(70100.0));
+        assert_eq!(cfg.entry_arm_price_str.as_deref(), Some("70100"));
+    }
+
+    #[test]
+    fn parse_args_rejects_entry_arm_without_entry_options() {
+        let err = parse_err(&[
+            "--symbol",
+            "BTC/USDC",
+            "--market",
+            "futures",
+            "--trigger",
+            "70000",
+            "--order",
+            "70500",
+            "--entry-arm",
+            "70100",
+        ]);
+        assert!(err.contains("--entry-arm requires --entry --stop --side"));
+    }
+
+    #[test]
+    fn parse_args_rejects_non_positive_entry_arm() {
+        let err = parse_err(&[
+            "--symbol",
+            "BTC/USDC",
+            "--market",
+            "futures",
+            "--trigger",
+            "70000",
+            "--order",
+            "70500",
+            "--entry",
+            "70000",
+            "--stop",
+            "69000",
+            "--side",
+            "long",
+            "--entry-arm",
+            "0",
+        ]);
+        assert!(err.contains("entry arm price must be > 0"));
+    }
+
+    #[test]
+    fn parse_args_rejects_spot_entry_arm() {
+        let err = parse_err(&[
+            "--symbol",
+            "BTC/USDC",
+            "--market",
+            "spot",
+            "--trigger",
+            "70000",
+            "--order",
+            "70500",
+            "--entry",
+            "70000",
+            "--stop",
+            "69000",
+            "--side",
+            "long",
+            "--entry-arm",
+            "70100",
+        ]);
+        assert!(err.contains("spot does not support entry/stop options"));
+    }
+}
+
 fn approx_eq(a: f64, b: f64) -> bool {
     let diff = (a - b).abs();
     let scale = a.abs().max(b.abs()).max(1.0);
@@ -2964,6 +3212,21 @@ fn entry_abort_touched(entry_price: f64, abort_price: f64, price: f64) -> bool {
     } else {
         price < abort_price
     }
+}
+
+fn entry_arm_touched(entry_price: f64, arm_price: f64, price: f64) -> bool {
+    if approx_eq(price, arm_price) {
+        return true;
+    }
+    if arm_price >= entry_price {
+        price > arm_price
+    } else {
+        price < arm_price
+    }
+}
+
+fn should_cancel_stops_while_entry_arm_waiting(has_position: bool) -> bool {
+    !has_position
 }
 
 fn now_millis() -> u64 {
@@ -3125,6 +3388,23 @@ fn parse_entry_detect(value: &str) -> Option<EntryDetect> {
 }
 
 fn parse_args() -> Result<Config, String> {
+    parse_args_from(
+        env::args().skip(1),
+        entry_usdc_from_env(),
+        entry_leverage_from_env(),
+        entry_detect_from_env(),
+    )
+}
+
+fn parse_args_from<I>(
+    args: I,
+    entry_usdc_env: Option<String>,
+    entry_leverage_env: Option<String>,
+    entry_detect_env: Option<String>,
+) -> Result<Config, String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut symbol_input: Option<String> = None;
     let mut market_input: Option<String> = None;
     let mut trigger_price: Option<String> = None;
@@ -3135,10 +3415,11 @@ fn parse_args() -> Result<Config, String> {
     let mut entry_usdc: Option<String> = None;
     let mut entry_leverage: Option<String> = None;
     let mut entry_detect: Option<String> = None;
+    let mut entry_arm: Option<String> = None;
     let mut entry_abort: Option<String> = None;
     let mut log_enabled = true;
 
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--symbol" => symbol_input = args.next(),
@@ -3151,6 +3432,7 @@ fn parse_args() -> Result<Config, String> {
             "--entry-usdc" => entry_usdc = args.next(),
             "--leverage" => entry_leverage = args.next(),
             "--entry-detect" => entry_detect = args.next(),
+            "--entry-arm" => entry_arm = args.next(),
             "--entry-abort" => entry_abort = args.next(),
             "--no-log" => log_enabled = false,
             "--help" | "-h" => return Err(usage()),
@@ -3181,7 +3463,7 @@ fn parse_args() -> Result<Config, String> {
         TriggerMode::Above
     };
 
-    let entry_detect = match entry_detect.or_else(entry_detect_from_env) {
+    let entry_detect = match entry_detect.or(entry_detect_env) {
         Some(value) => parse_entry_detect(&value).ok_or_else(usage)?,
         None => EntryDetect::Prefix,
     };
@@ -3193,7 +3475,7 @@ fn parse_args() -> Result<Config, String> {
             let stop_price = stop_str.parse::<f64>().map_err(|_| usage())?;
             let side = parse_entry_side(&side_str).ok_or_else(usage)?;
 
-            let entry_usdc_str = entry_usdc.or_else(entry_usdc_from_env);
+            let entry_usdc_str = entry_usdc.or(entry_usdc_env);
             let entry_usdc_provided = entry_usdc_str.is_some();
             let entry_usdc_value = match entry_usdc_str.as_deref() {
                 Some(usdc_str) => {
@@ -3205,7 +3487,7 @@ fn parse_args() -> Result<Config, String> {
                 }
                 None => None,
             };
-            let leverage_str = entry_leverage.or_else(entry_leverage_from_env);
+            let leverage_str = entry_leverage.or(entry_leverage_env);
             let leverage_provided = leverage_str.is_some();
             let leverage = match leverage_str.as_deref() {
                 Some(leverage_str) => {
@@ -3232,6 +3514,20 @@ fn parse_args() -> Result<Config, String> {
             })
         }
         _ => return Err("entry options require --entry --stop --side\n".to_string() + &usage()),
+    };
+
+    let entry_arm_parsed = match entry_arm {
+        Some(value) => {
+            if entry.is_none() {
+                return Err("--entry-arm requires --entry --stop --side\n".to_string() + &usage());
+            }
+            let price = value.parse::<f64>().map_err(|_| usage())?;
+            if price <= 0.0 {
+                return Err("entry arm price must be > 0\n".to_string() + &usage());
+            }
+            Some((price, value))
+        }
+        None => None,
     };
 
     let entry_abort_parsed = match entry_abort {
@@ -3262,6 +3558,8 @@ fn parse_args() -> Result<Config, String> {
         log_enabled,
         entry,
         entry_detect,
+        entry_arm_price: entry_arm_parsed.as_ref().map(|(price, _)| *price),
+        entry_arm_price_str: entry_arm_parsed.map(|(_, value)| value),
         entry_abort_price: entry_abort_parsed.as_ref().map(|(price, _)| *price),
         entry_abort_price_str: entry_abort_parsed.map(|(_, value)| value),
         base_asset: None,
@@ -3272,7 +3570,7 @@ fn parse_args() -> Result<Config, String> {
 fn usage() -> String {
     [
         "usage:",
-        "  rb --symbol <pair> --market <futures|spot> --trigger <price> --order <price> [--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]] [--no-log]",
+        "  rb --symbol <pair> --market <futures|spot> --trigger <price> --order <price> [--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-arm <price>] [--entry-abort <price>]] [--no-log]",
         "  note: entry/stop options are supported for futures only",
         "env:",
         "  BINANCE_API_KEY=... BINANCE_API_SECRET=... [BINANCE_BASE_URL=<market default>] [BINANCE_EXCHANGE_BASE_URL=<market default>] [RB_LOG_PATH=rb.log] [RB_ENTRY_USDC=<amount>] [RB_ENTRY_LEVERAGE=100] [RB_ENTRY_DETECT=prefix|any]",

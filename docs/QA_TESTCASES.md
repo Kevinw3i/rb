@@ -136,3 +136,24 @@
    - Enable Telegram alerts and use credentials that repeatedly trigger the same error (for example, invalid Binance key causing repeated `event=position_refresh_error` with the same message).
    - Observe stderr for repeated `ERROR` logs over one minute.
    - Expect Telegram to deliver at most one alert per 60 seconds for the same `market + symbol + message`, while stderr still prints every error occurrence.
+
+39. Entry arm parameter validation
+   - Run with `--entry-arm` but without one of `--entry/--stop/--side`.
+   - Expect a usage error: `--entry-arm requires --entry --stop --side`.
+   - Run with `--entry-arm 0`.
+   - Expect a usage error: `entry arm price must be > 0`.
+
+40. Entry arm waits before placing new entry/stop
+   - Configure `--entry/--stop/--side --entry-arm` and keep market price away from arm threshold.
+   - In a flat account, if detected entry/stop orders already exist, expect `entry_arm_cleanup` and cancellation of those orders.
+   - Expect `entry_arm_wait` logs and no new entry placement before arm is touched.
+
+41. Entry arm still protects existing position
+   - Start with an open futures position and configure `--entry-arm` not yet touched.
+   - Expect no new entry placement while waiting.
+   - Expect stop-loss to remain synchronized for the open position, without repeated `stop_cancel_orders` + `stop_place_order` churn on every manage tick.
+
+42. Entry arm trigger resumes normal entry/stop flow
+   - Let price reach the arm threshold after startup.
+   - Expect one `entry_arm_triggered` event.
+   - Expect normal entry/stop management to resume (entry placed if needed, stop synchronized).

@@ -10,10 +10,13 @@
 - Startup validates the symbol exists for the selected market; invalid symbols exit with a warning.
 
 ## Entry Options
-- Optional entry/stop inputs (futures only): `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-abort <price>]`.
+- Optional entry/stop inputs (futures only): `--entry <price> --stop <price> --side <long|short> --entry-usdc <amount> [--leverage <n>] [--entry-detect <prefix|any>] [--entry-arm <price>] [--entry-abort <price>]`.
 - Entry order size is derived from USDC amount and leverage (default 100), then floored to the LOT_SIZE step from exchange info.
 - When both entry USDC and leverage are provided, startup cancels same-price entry/stop orders before re-placing them with the computed rounded quantity.
 - Entry is single-use: once a position is opened, no new entry orders are placed.
+- If `--entry-arm` is set, entry/stop management starts only after arm is touched (above if arm >= entry, below if arm < entry).
+- Before arm is touched, the bot cancels detected entry orders; stop-loss orders are canceled only when no position exists.
+- If a position exists before arm is touched, stop-loss protection is preserved and synchronized (no forced stop churn).
 - If `--entry-abort` is set and the market price reaches that level before entry fills, the bot cancels open entry and stop-loss orders and exits.
 - If an entry order already exists at startup (per entry detection), `--entry-abort` is ignored for this run.
 - Entry detection default is `prefix`; use `any` to detect web-placed LIMIT orders matching entry price/side.
