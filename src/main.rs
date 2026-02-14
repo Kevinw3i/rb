@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -63,6 +63,9 @@ const RATE_LIMIT_BACKOFF_INITIAL_SECS: u64 = 1;
 const RATE_LIMIT_MAX_BACKOFF_SECS: u64 = 120;
 const RATE_LIMIT_MAX_RETRIES: u32 = 3;
 const ERROR_ALERT_DEDUP_WINDOW_SECS: u64 = 60;
+const COLOR_GREEN: &str = "\x1b[32m";
+const COLOR_RED: &str = "\x1b[31m";
+const COLOR_RESET: &str = "\x1b[0m";
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -381,9 +384,21 @@ impl Logger {
     }
 
     fn log(&self, level: LogLevel, message: &str, print_stderr: bool) {
-        let line = format!("[{}] {} {}", log_timestamp(), level.as_str(), message);
+        let level_str = level.as_str();
+        let timestamp = log_timestamp();
+        let line = format!("[{timestamp}] {level_str} {message}");
+        let output = if print_stderr && std::io::stderr().is_terminal() {
+            let colored_level = match level {
+                LogLevel::Event => format!("{COLOR_GREEN}{level_str}{COLOR_RESET}"),
+                LogLevel::Error => format!("{COLOR_RED}{level_str}{COLOR_RESET}"),
+                LogLevel::Tick => level_str.to_string(),
+            };
+            format!("[{timestamp}] {colored_level} {message}")
+        } else {
+            line.clone()
+        };
         if print_stderr {
-            eprintln!("{line}");
+            eprintln!("{output}");
         }
         if self.inner.enabled && matches!(level, LogLevel::Event) {
             if let Err(err) = self.write_line(&line) {
