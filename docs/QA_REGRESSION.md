@@ -12,7 +12,9 @@
 - Futures reduce-only orders are placed with `GTX` and canceled on trigger exit (bot-managed clientOrderId only).
 - Spot mode does not accept entry/stop options and uses `LIMIT_MAKER` take-profit orders.
 - Entry maker-only orders and stop-loss orders operate independently of trigger/order.
-- If `--entry-arm` is configured, entry/stop management waits until the arm threshold is touched (above if arm >= entry, below if arm < entry).
+- If `--entry-arm` is configured, entry/stop management waits until the arm threshold is touched.
+- For `long`, arm must be above entry and is touched/activated on first down-cross.
+- For `short`, arm must be below entry and is touched/activated on first up-cross.
 - Before `--entry-arm` is touched, detected entry orders are canceled; stop orders are canceled only when no position exists.
 - Open positions retain and synchronize existing stop-loss orders while waiting for arm (no repeated stop cancel/recreate).
 - Stop-loss uses UM conditional orders and stays in sync with open conditional orders.

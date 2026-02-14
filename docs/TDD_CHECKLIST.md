@@ -33,7 +33,9 @@
 - [ ] Entry order uses maker-only LIMIT at `--entry` (GTX) with `entry_usdc * leverage / entry_price`.
 - [ ] Entry order quantity is floored to the LOT_SIZE step from exchange info (log raw vs rounded).
 - [ ] Entry order placement requires entry USDC amount; leverage defaults to 100.
-- [ ] If `--entry-arm` is set, entry/stop stays inactive until arm threshold is touched (above if arm >= entry, below if arm < entry).
+- [ ] If `--entry-arm` is set, entry/stop stays inactive until arm threshold is touched.
+- [ ] For `long`, `entry-arm` must be above `entry`, and arm is triggered on touch/first down-cross.
+- [ ] For `short`, `entry-arm` must be below `entry`, and arm is triggered on touch/first up-cross.
 - [ ] Before `--entry-arm` is touched, detected entry orders are canceled.
 - [ ] Before `--entry-arm` is touched, stop orders are canceled only when no position exists.
 - [ ] Before `--entry-arm` is touched, existing positions still keep stop-loss protection active.

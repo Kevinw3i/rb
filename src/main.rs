@@ -1484,7 +1484,7 @@ impl OrderManager {
         }
 
         if let Some(entry_arm) = self.config.entry_arm_price {
-            let arm_mode = if entry_arm >= entry.entry_price {
+            let arm_mode = if matches!(entry.side, EntrySide::Short) {
                 "above"
             } else {
                 "below"
@@ -1503,7 +1503,7 @@ impl OrderManager {
             }
 
             if !self.entry_arm_triggered {
-                if entry_arm_touched(entry.entry_price, entry_arm, price) {
+                if entry_arm_touched(entry.side, entry_arm, price) {
                     self.entry_arm_triggered = true;
                     self.event_with_price(&format!(
                         "event=entry_arm_triggered symbol={symbol} arm={arm_price_str} mode={arm_mode}"
@@ -3059,20 +3059,30 @@ mod entry_arm_tests {
     use super::*;
 
     #[test]
-    fn entry_arm_touched_uses_upper_direction_when_arm_at_or_above_entry() {
-        assert!(entry_arm_touched(100.0, 110.0, 110.0));
-        assert!(entry_arm_touched(100.0, 110.0, 111.0));
-        assert!(!entry_arm_touched(100.0, 110.0, 109.9));
-        assert!(entry_arm_touched(100.0, 100.0, 100.0));
-        assert!(entry_arm_touched(100.0, 100.0, 100.1));
-        assert!(!entry_arm_touched(100.0, 100.0, 99.9));
+    fn entry_arm_touched_long_waits_for_down_cross() {
+        assert!(entry_arm_touched(EntrySide::Long, 110.0, 110.0));
+        assert!(entry_arm_touched(EntrySide::Long, 110.0, 109.9));
+        assert!(!entry_arm_touched(EntrySide::Long, 110.0, 110.1));
+        assert!(entry_arm_touched(EntrySide::Long, 100.0, 100.0));
+        assert!(entry_arm_touched(EntrySide::Long, 100.0, 99.9));
+        assert!(!entry_arm_touched(EntrySide::Long, 100.0, 100.1));
     }
 
     #[test]
-    fn entry_arm_touched_uses_lower_direction_when_arm_below_entry() {
-        assert!(entry_arm_touched(100.0, 95.0, 95.0));
-        assert!(entry_arm_touched(100.0, 95.0, 94.9));
-        assert!(!entry_arm_touched(100.0, 95.0, 95.1));
+    fn entry_arm_touched_short_waits_for_up_cross() {
+        assert!(entry_arm_touched(EntrySide::Short, 95.0, 95.0));
+        assert!(entry_arm_touched(EntrySide::Short, 95.0, 95.1));
+        assert!(!entry_arm_touched(EntrySide::Short, 95.0, 94.9));
+        assert!(entry_arm_touched(EntrySide::Short, 71000.0, 71000.0));
+        assert!(entry_arm_touched(EntrySide::Short, 71000.0, 71000.1));
+        assert!(!entry_arm_touched(EntrySide::Short, 71000.0, 70999.9));
+    }
+
+    #[test]
+    fn entry_arm_touched_short_uses_examples_from_user_expectation() {
+        assert!(entry_arm_touched(EntrySide::Short, 70100.0, 70100.0));
+        assert!(entry_arm_touched(EntrySide::Short, 70100.0, 70100.1));
+        assert!(!entry_arm_touched(EntrySide::Short, 70100.0, 70099.9));
     }
 
     #[test]
@@ -3174,6 +3184,52 @@ mod parse_args_tests {
     }
 
     #[test]
+    fn parse_args_rejects_entry_arm_not_above_entry_for_long() {
+        let err = parse_err(&[
+            "--symbol",
+            "BTC/USDC",
+            "--market",
+            "futures",
+            "--trigger",
+            "70000",
+            "--order",
+            "70500",
+            "--entry",
+            "70100",
+            "--stop",
+            "69000",
+            "--side",
+            "long",
+            "--entry-arm",
+            "70000",
+        ]);
+        assert!(err.contains("for --side long, --entry-arm must be greater than --entry"));
+    }
+
+    #[test]
+    fn parse_args_rejects_entry_arm_not_below_entry_for_short() {
+        let err = parse_err(&[
+            "--symbol",
+            "BTC/USDC",
+            "--market",
+            "futures",
+            "--trigger",
+            "70000",
+            "--order",
+            "70500",
+            "--entry",
+            "69000",
+            "--stop",
+            "70000",
+            "--side",
+            "short",
+            "--entry-arm",
+            "70000",
+        ]);
+        assert!(err.contains("for --side short, --entry-arm must be less than --entry"));
+    }
+
+    #[test]
     fn parse_args_rejects_spot_entry_arm() {
         let err = parse_err(&[
             "--symbol",
@@ -3214,11 +3270,14 @@ fn entry_abort_touched(entry_price: f64, abort_price: f64, price: f64) -> bool {
     }
 }
 
-fn entry_arm_touched(entry_price: f64, arm_price: f64, price: f64) -> bool {
+fn entry_arm_touched(entry_side: EntrySide, arm_price: f64, price: f64) -> bool {
     if approx_eq(price, arm_price) {
         return true;
     }
-    if arm_price >= entry_price {
+
+    let is_above_mode = matches!(entry_side, EntrySide::Short);
+
+    if is_above_mode {
         price > arm_price
     } else {
         price < arm_price
@@ -3543,6 +3602,18 @@ where
         }
         None => None,
     };
+
+    if let (Some(entry), Some((entry_arm_price, _))) = (&entry, &entry_arm_parsed) {
+        match entry.side {
+            EntrySide::Long if !(entry.entry_price < *entry_arm_price) => {
+                return Err("for --side long, --entry-arm must be greater than --entry\n".to_string() + &usage());
+            }
+            EntrySide::Short if !(entry.entry_price > *entry_arm_price) => {
+                return Err("for --side short, --entry-arm must be less than --entry\n".to_string() + &usage());
+            }
+            _ => {}
+        }
+    }
 
     if matches!(market, MarketType::Spot) && entry.is_some() {
         return Err("spot does not support entry/stop options\n".to_string() + &usage());

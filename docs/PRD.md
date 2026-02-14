@@ -34,7 +34,9 @@
 - If the take-profit or stop-loss order fills, cancel remaining managed orders and exit.
 - User data stream (market-specific) listens for fills and triggers the same exit flow.
 - Optional entry/stop flow (independent of trigger/order):
-  - If `--entry-arm` is set, entry/stop management is armed only after price reaches arm threshold (above if arm >= entry, below if arm < entry).
+  - If `--entry-arm` is set, entry/stop management is armed only after price reaches arm threshold.
+  - For `--side long`, `entry-arm` must be above `entry`, and arm is triggered on a touch/first down-cross.
+  - For `--side short`, `entry-arm` must be below `entry`, and arm is triggered on a touch/first up-cross.
   - Before `--entry-arm` is touched, detected entry orders are canceled; stop-loss orders are canceled only when no position exists.
   - If a position already exists before arm is touched, existing stop-loss orders are preserved and synchronized (no forced stop cancel/recreate loop).
   - Once `--entry-arm` is touched, entry/stop flow remains armed for this run.

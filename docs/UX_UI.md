@@ -14,7 +14,9 @@
 - Entry order size is derived from USDC amount and leverage (default 100), then floored to the LOT_SIZE step from exchange info.
 - When both entry USDC and leverage are provided, startup cancels same-price entry/stop orders before re-placing them with the computed rounded quantity.
 - Entry is single-use: once a position is opened, no new entry orders are placed.
-- If `--entry-arm` is set, entry/stop management starts only after arm is touched (above if arm >= entry, below if arm < entry).
+- If `--entry-arm` is set, entry/stop management starts only after arm is touched.
+- For `--side long`, `entry-arm` must be higher than `entry`, and arm is triggered on touch/first down-cross.
+- For `--side short`, `entry-arm` must be lower than `entry`, and arm is triggered on touch/first up-cross.
 - Before arm is touched, the bot cancels detected entry orders; stop-loss orders are canceled only when no position exists.
 - If a position exists before arm is touched, stop-loss protection is preserved and synchronized (no forced stop churn).
 - If `--entry-abort` is set and the market price reaches that level before entry fills, the bot cancels open entry and stop-loss orders and exits.
