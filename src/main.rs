@@ -1685,7 +1685,6 @@ impl OrderManager {
             self.entry_missing_logged = false;
         }
 
-        let entry_ready = has_entry_orders || entry_qty.is_some();
         if self.entry_completed {
             // Entry already filled once; do not place new entry orders.
         } else if let Some((entry_qty, entry_qty_str)) = entry_qty.clone() {
