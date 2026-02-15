@@ -1573,6 +1573,34 @@ impl OrderManager {
         let should_startup_cleanup = !self.entry_startup_cleanup_done
             && entry.entry_usdc_provided
             && entry.leverage_provided;
+
+        if let Some(entry_abort) = self.config.entry_abort_price {
+            if !self.entry_completed
+                && !has_position
+                && entry_abort_touched(entry.entry_price, entry_abort, price)
+            {
+                let abort_str = self
+                    .config
+                    .entry_abort_price_str
+                    .as_deref()
+                    .unwrap_or("unset");
+                self.event_with_price(&format!(
+                    "event=entry_abort_touched symbol={symbol} abort={abort_str}"
+                ));
+                let extra_entry_orders: Vec<OpenOrder> = entry_orders
+                    .iter()
+                    .filter(|order| !order.client_order_id.starts_with(ENTRY_CLIENT_ID_PREFIX))
+                    .cloned()
+                    .collect();
+                if !extra_entry_orders.is_empty() {
+                    self.cancel_orders(symbol, &extra_entry_orders).await?;
+                }
+                self.exit_with_reason(symbol, "entry_abort_touched", "tick")
+                    .await?;
+                return Ok(());
+            }
+        }
+
         if should_startup_cleanup {
             let same_price_entry_orders: Vec<OpenOrder> = entry_orders
                 .iter()
@@ -1658,34 +1686,6 @@ impl OrderManager {
         }
 
         let entry_ready = has_entry_orders || entry_qty.is_some();
-        if let Some(entry_abort) = self.config.entry_abort_price {
-            if entry_ready
-                && !self.entry_completed
-                && !has_position
-                && entry_abort_touched(entry.entry_price, entry_abort, price)
-            {
-                let abort_str = self
-                    .config
-                    .entry_abort_price_str
-                    .as_deref()
-                    .unwrap_or("unset");
-                self.event_with_price(&format!(
-                    "event=entry_abort_touched symbol={symbol} abort={abort_str}"
-                ));
-                let extra_entry_orders: Vec<OpenOrder> = entry_orders
-                    .iter()
-                    .filter(|order| !order.client_order_id.starts_with(ENTRY_CLIENT_ID_PREFIX))
-                    .cloned()
-                    .collect();
-                if !extra_entry_orders.is_empty() {
-                    self.cancel_orders(symbol, &extra_entry_orders).await?;
-                }
-                self.exit_with_reason(symbol, "entry_abort_touched", "tick")
-                    .await?;
-                return Ok(());
-            }
-        }
-
         if self.entry_completed {
             // Entry already filled once; do not place new entry orders.
         } else if let Some((entry_qty, entry_qty_str)) = entry_qty.clone() {
